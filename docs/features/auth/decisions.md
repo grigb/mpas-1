@@ -1,5 +1,12 @@
 # MPAS Coordination Authentication — Decisions
 
+> Signature-suite update: [ES256 specification](../es256/spec.md) supersedes
+> Ed25519-only algorithm guidance and the earlier SHOULD-omit-`alg` sender rule.
+> New senders include `alg`; absent HTTP `alg` means `ed25519` without changing
+> the signature base. Verifiers support both specified suites. Historical
+> completed tasks and unchanged absent-`alg` fixtures below record the original implementation.
+
+
 **Companion to:** [`spec.md`](./spec.md)
 **Issue:** [#3](https://github.com/oma3dao/mpas/issues/3)
 

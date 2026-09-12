@@ -164,7 +164,7 @@ A server **SHOULD** accept the HTTP header `Idempotency-Key` when the request me
 
 Authentication enforcement is determined solely by the trust boundary and endpoint role (§4.6.5).
 
-Authentication uses [RFC 9421 HTTP Message Signatures](https://www.rfc-editor.org/rfc/rfc9421) with [RFC 9530 Content-Digest](https://www.rfc-editor.org/rfc/rfc9530). The caller proves control of the DID it claims by signing the request with the corresponding Ed25519 key.
+Authentication uses [RFC 9421 HTTP Message Signatures](https://www.rfc-editor.org/rfc/rfc9421) with [RFC 9530 Content-Digest](https://www.rfc-editor.org/rfc/rfc9530). The caller proves control of the DID it claims by signing the request with the corresponding Ed25519 or P-256 key.
 
 #### 4.6.1 Wire Format
 
@@ -175,7 +175,7 @@ Content-Digest: sha-256=:X48E9qOokqqrvdts8nOJRJN3OWDUoyWxBf7kbu9DBPE=:
 Signature-Input: mpas=("@method" "@path" "content-digest");\
   created=1754400000;expires=1754400060;\
   keyid="did:jwk:eyJjcnYiOiJFZDI1NTE5Iiwia3R5IjoiT0tQIiwieCI6Ii4uLiJ9";\
-  nonce="f9a3c1b7e2d4508a";tag="mpas-v1"
+  nonce="f9a3c1b7e2d4508a";tag="mpas-v1";alg="ed25519"
 Signature: mpas=:K2qGT5srn2OGbOIDzQ6kYT+ruaycnDAAUpKv+ePFfD0RAxn...:
 
 {"version":"1","type":"CoordinationPollRequest",
@@ -190,7 +190,7 @@ Signature base:
 "@path": /mpas/v1/coordination/poll
 "content-digest": sha-256=:X48E9qOokqqrvdts8nOJRJN3OWDUoyWxBf7kbu9DBPE=:
 "@signature-params": ("@method" "@path" "content-digest");created=1754400000;\
-expires=1754400060;keyid="did:jwk:...";nonce="f9a3c1b7e2d4508a";tag="mpas-v1"
+expires=1754400060;keyid="did:jwk:...";nonce="f9a3c1b7e2d4508a";tag="mpas-v1";alg="ed25519"
 ```
 
 #### 4.6.2 Signature Requirements
@@ -199,9 +199,16 @@ Covered components **MUST** be exactly `("@method" "@path" "content-digest")`. `
 
 `keyid` **MUST** be the caller's DID. The DID **MUST** use the `did:jwk` method. The verification key **MUST** be derived from `keyid` by decoding the embedded JWK. The embedded JWK **MUST** contain public key material only; a verifier **MUST** reject any `did:jwk` containing private key material. No DID document is fetched; no resolver is invoked.
 
-The algorithm is EdDSA, derived from the Ed25519 key in the `did:jwk`. If `alg` is present in signature parameters, it **MUST** equal `ed25519`; any other value **MUST** be rejected. (Note: `EdDSA` is the JWS/JWK algorithm name; `ed25519` is the RFC 9421 HTTP Message Signatures registry name. They refer to the same algorithm.) Future key types define their own algorithm binding.
+The key MUST satisfy the Core specification's public-key suite rules. Conforming verifiers MUST verify both suites and MUST NOT be configurable to disable either:
 
-Signers **SHOULD** omit `alg` to match the canonical wire example in §4.6.1 and avoid redundant metadata when the key embedded in `keyid` already determines the algorithm. Omitting it also keeps RFC 9421 B.2.6 directly usable as the byte-exact known-answer gate. Verifiers **MUST** accept a signature whose parameters omit `alg`, and **MUST** accept one where it is present and equal to `ed25519`. Both forms interoperate and can be fixtured independently; every byte-exact fixture must specify which form it covers because `@signature-params` is reproduced verbatim in the signature base.
+| Public JWK | RFC 9421 `alg` | Signature bytes |
+|---|---|---|
+| OKP/Ed25519 | `ed25519` | 64-byte Ed25519 signature |
+| EC/P-256 | `ecdsa-p256-sha256` | 64-byte raw `R || S`, each unsigned big-endian integer padded to 32 bytes |
+
+New signing implementations MUST include the suite-derived `alg` in the signed `Signature-Input` parameters. If HTTP `alg` is absent, its claimed value for algorithm matching MUST be `ed25519`. Verifiers MUST reconstruct the signature base from the received parameters, without inserting the default into `@signature-params`. P-256 with absent `alg` MUST fail as a key/algorithm mismatch. This standing rule is HTTP-only; JWS requires protected `alg`.
+
+The verifier MUST validate the public key and derive its suite before checking the claimed algorithm. Unknown identifiers, JWS names used as HTTP identifiers, key/algorithm mismatches, unsupported curves, incorrect lengths, invalid ECDSA scalars, and DER-encoded ECDSA wire signatures MUST be rejected. The original absent-`alg` Ed25519 fixtures remain valid, alongside separate explicit-`alg` fixtures for new senders. SHA-256 is applied exactly once to the complete P-256 signature base; callers MUST NOT pre-hash.
 
 `created` and `expires` **MUST** be present integer timestamps. `expires` **MUST** be strictly greater than `created`, and `expires - created` **MUST NOT** exceed 60 seconds. This ceiling is the declared-lifetime MPAS profile constraint that bounds replay exposure and nonce-retention requirements. Clients and deployments **MAY** choose a shorter period but not a longer one. The server **MUST** reject requests whose `created` is in the future beyond configured `clockSkew` (suggested default: 30 seconds), or whose `expires` has passed. The declared maximum lifetime remains 60 seconds, but configured future clock skew can extend the server-observed acceptance horizon by up to `clockSkew`.
 

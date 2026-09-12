@@ -61,7 +61,7 @@ describe("MPAS RFC 9421", () => {
     expect(headers["Signature-Input"]).toContain('mpas=("@method" "@path" "content-digest")');
     expect(headers["Signature-Input"]).toContain(';keyid="did:jwk:');
     expect(headers["Signature-Input"]).toContain(';nonce="round-trip";tag="mpas-v1"');
-    expect(headers["Signature-Input"]).not.toContain(";alg=");
+    expect(headers["Signature-Input"]).toContain(';alg="ed25519"');
 
     await expectVerified(headers, body, signer.did);
   });
@@ -88,7 +88,7 @@ describe("MPAS RFC 9421", () => {
     );
   });
 
-  it("reproduces the committed MPAS v1 fixture byte-exactly", async () => {
+  it("verifies the unchanged absent-alg MPAS v1 fixture", async () => {
     const fixturePath = fileURLToPath(
       new URL("../../../../conformance/http-message-signatures/mpas-v1-ed25519.json", import.meta.url),
     );
@@ -96,21 +96,17 @@ describe("MPAS RFC 9421", () => {
     const signer = await fixtureSigner("proposer");
     expect(signer.did).toBe(fixture.did);
 
-    const headers = await signMpasRfc9421({
-      method: fixture.request.method,
-      path: fixture.request.path,
-      body: Buffer.from(fixture.request.body),
-      signer,
-      created: new Date(fixture.created * 1000),
-      expires: new Date(fixture.expires * 1000),
-      nonce: fixture.nonce,
-    });
-
-    expect(headers).toEqual({
+    const headers = {
       "Content-Digest": fixture.contentDigest,
       "Signature-Input": fixture.signatureInput,
       Signature: fixture.signature,
+    };
+    const result = await verifyMpasRfc9421({
+      method: fixture.request.method, path: fixture.request.path,
+      body: Buffer.from(fixture.request.body), headers,
+      audiences: ["https://coordination.example.com"], now: new Date(fixture.created * 1000),
     });
+    expect(result.ok).toBe(true);
   });
 
   it("accepts an alternate label and ignores unrelated signatures", async () => {

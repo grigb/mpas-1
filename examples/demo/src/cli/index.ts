@@ -14,7 +14,7 @@ import { policyFromLoadedConfig } from "../adapter/adapter-api-server.js";
 import { evaluatePolicy } from "../core/policy-engine.js";
 import { loadPlugin, validatePayloadAgainstPlugin } from "../core/plugin-loader.js";
 import { parseActionPackage, verifyActionPackage } from "../core/verification.js";
-import { generateEd25519Key, didJwkToJwk, isDidJwk } from "../core/did-jwk.js";
+import { generateMpasKey, didJwkToJwk, isDidJwk } from "../core/did-jwk.js";
 import type { Did } from "../core/types.js";
 import {
   type OAuthOperatorService,
@@ -50,6 +50,7 @@ interface ParsedOptions {
   journalPath?: string;
   tracePath?: string;
   keyDir?: string;
+  suite?: "Ed25519" | "P-256";
   bridgeDir?: string;
   host?: string;
   port?: number;
@@ -268,7 +269,7 @@ export async function runCli(
     }
 
     if (domain === "key" && command === "generate" && subject) {
-      const response = await generateKeyFile(subject, options.keyDir ?? defaultKeyDir());
+      const response = await generateKeyFile(subject, options.keyDir ?? defaultKeyDir(), options.suite);
       io.stdout.write(`${JSON.stringify(response, null, 2)}\n`);
       return { exitCode: 0 };
     }
@@ -427,8 +428,8 @@ export async function listPlugins(pluginDir: string) {
   return { plugins };
 }
 
-export async function generateKeyFile(name: string, keyDir: string) {
-  const key = await generateEd25519Key();
+export async function generateKeyFile(name: string, keyDir: string, suite: "Ed25519" | "P-256" = "Ed25519"): Promise<{ created: boolean; name: string; path: string; did: Did; publicJwk: import("jose").JWK }> {
+  const key = await generateMpasKey(suite);
   await mkdir(keyDir, { recursive: true });
   const path = join(keyDir, `${name}.json`);
   const contents = {
@@ -437,7 +438,7 @@ export async function generateKeyFile(name: string, keyDir: string) {
     privateJwk: key.privateJwk,
     publicJwk: key.publicJwk,
   };
-  await writeFile(path, `${JSON.stringify(contents, null, 2)}\n`, { mode: 0o600 });
+  await writeFile(path, `${JSON.stringify(contents, null, 2)}\n`, { mode: 0o600, flag: "wx" });
   await chmod(path, 0o600);
   return {
     created: true,
@@ -738,6 +739,11 @@ function parseArgs(args: string[]): { positionals: string[]; options: ParsedOpti
       options.tracePath = args[++index];
     } else if (arg === "--key-dir") {
       options.keyDir = args[++index];
+    } else if (arg === "--suite") {
+      const suite = requiredOptionValue(args, index, arg);
+      index += 1;
+      if (suite !== "Ed25519" && suite !== "P-256") throw new Error("Unsupported signing suite: use Ed25519 or P-256.");
+      options.suite = suite;
     } else if (arg === "--bridge-dir") {
       options.bridgeDir = args[++index];
     } else if (arg === "--host") {
@@ -816,7 +822,7 @@ function usage(): string {
     "  mpas action pending [--config <signer-config>]",
     "  mpas action inspect <action-id> [--config <signer-config>]",
     "  mpas action review <action-id> [--config <signer-config>]",
-    "  mpas key generate <name> [--key-dir <dir>]",
+    "  mpas key generate <name> [--key-dir <dir>] [--suite Ed25519|P-256]",
     "  mpas test submit <file> [--url <adapter-url>]",
     "  mpas test dry-run <file> [--config-dir <dir>]",
     "  mpas plugin install <path> [--plugin-dir <dir>]",

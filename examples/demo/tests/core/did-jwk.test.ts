@@ -63,8 +63,8 @@ describe("did:jwk derivation", () => {
     expect(a.did).not.toBe(b.did);
   });
 
-  it("rejects non-Ed25519 JWKs for derivation", () => {
-    expect(() => deriveDidJwk({ kty: "OKP", crv: "X25519", x: "x" })).toThrow(/Ed25519/);
+  it("rejects unsupported curves for derivation", () => {
+    expect(() => deriveDidJwk({ kty: "OKP", crv: "X25519", x: "x" })).toThrow(/Unsupported/);
   });
 
   it("rejects a malformed did:jwk payload", () => {

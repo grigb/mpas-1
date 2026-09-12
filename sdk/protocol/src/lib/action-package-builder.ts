@@ -10,7 +10,8 @@ import type {
   ExecutionPayload,
 } from "../types/mpas.js";
 import { computeJsonHash } from "../utils/hash.js";
-import { KeyManager } from "./key-manager.js";
+import type { KeyManager } from "./key-manager.js";
+import { signMpasCompactJws, validateSignerIdentity, type MpasJwsSigner } from "./signer.js";
 
 /** Reusable configuration for constructing Proposer-authored Action Packages. */
 export interface ActionPackageBuilderConfig {
@@ -22,16 +23,22 @@ export interface ActionPackageBuilderConfig {
     format: string;
   };
   /** Proposer key used to derive the Proposer DID and sign the proposal Approval. */
-  keyManager: KeyManager;
+  keyManager?: KeyManager;
+  /** Shared signing capability; supply exactly one of signer or keyManager. */
+  signer?: MpasJwsSigner;
   /** Default Action validity window. Defaults to 30 minutes. */
   defaultExpirationMinutes?: number;
 }
 
 /** Builds complete, Proposer-signed Action Packages from MCP tool calls. */
 export class ActionPackageBuilder {
+  private readonly signer: MpasJwsSigner;
   private readonly defaultExpirationMinutes: number;
 
   constructor(private readonly config: ActionPackageBuilderConfig) {
+    if (Boolean(config.signer) === Boolean(config.keyManager)) throw new Error("Supply exactly one signer or keyManager.");
+    this.signer = config.signer ?? config.keyManager!;
+    validateSignerIdentity(this.signer);
     this.defaultExpirationMinutes = config.defaultExpirationMinutes ?? 30;
   }
 
@@ -60,7 +67,7 @@ export class ActionPackageBuilder {
     actionPackage: ActionPackage;
     authorizationRequirements: AdditionalApprovalsAuthorizationRequirements;
   }> {
-    if (priorPackage.actionEnvelope.proposer.did !== this.config.keyManager.did) {
+    if (priorPackage.actionEnvelope.proposer.did !== this.signer.did) {
       throw new Error("Cannot replace an Action authored by a different Proposer.");
     }
     const priorActionEnvelopeHash = computeJsonHash(priorPackage.actionEnvelope);
@@ -126,7 +133,7 @@ export class ActionPackageBuilder {
       version: "1",
       type: "ActionEnvelope",
       proposer: {
-        did: this.config.keyManager.did,
+        did: this.signer.did,
       },
       target: {
         applicationDid: this.config.applicationDid,
@@ -160,10 +167,10 @@ export class ActionPackageBuilder {
       type: "ApprovalPayload",
       actionEnvelopeHash,
       decision: "propose",
-      signerDid: this.config.keyManager.did,
+      signerDid: this.signer.did,
       createdAt,
     };
-    const signature = await this.config.keyManager.signCompactJws(Buffer.from(canonicalize(approvalPayload)));
+    const signature = await signMpasCompactJws(this.signer, Buffer.from(canonicalize(approvalPayload)));
 
     return {
       version: "1",
@@ -192,7 +199,7 @@ export class ActionPackageBuilder {
         type: "ApprovalBundle",
         actionEnvelopeHash,
         approvals: [approval],
-        assembledBy: this.config.keyManager.did,
+        assembledBy: this.signer.did,
         createdAt,
       },
       createdAt,

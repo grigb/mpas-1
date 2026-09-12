@@ -274,7 +274,7 @@ cp configs/github-mirror-adapter-config.json "$MPAS_HOME/config/github-mirror-ad
 
 ### Generate signing keys
 
-The test suite uses hardcoded private keys so that fixtures (signed action packages, JWS signatures) are reproducible across runs. Those keys are committed to the repository and are not secret. For the demo, you generate your own keys — each participant gets a fresh Ed25519 key pair that derives a unique `did:jwk` identity.
+The test suite uses hardcoded private keys so that fixtures (signed action packages, JWS signatures) are reproducible across runs. Those keys are committed to the repository and are not secret. For the demo, you generate your own keys — each participant gets a fresh Ed25519 (default) or explicitly selected P-256 key pair that derives a unique `did:jwk` identity.
 
 You need three keys:
 
@@ -408,7 +408,7 @@ chmod 600 "$MPAS_HOME/credentials/github-mirror-token.json"
 
 For live GitHub dispatch below (§4.4), we will replace this with a real GitHub PAT.
 
-For an overview of how MPAS changes the credential model (what the adapter holds vs. what agents hold), see the [README](../../README.md#how-credentials-work-with-mpas).
+For an overview of how MPAS changes the credential model (what the adapter holds vs. what agents hold), see the [README](../README.md#how-credentials-work-with-mpas).
 
 To create fine-grained PATs, see: https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-fine-grained-personal-access-token
 
@@ -493,7 +493,7 @@ Keep this terminal running.
 
 ## 2.3 Configuration Reference
 
-For detailed documentation on all configuration files (application plugin, deployment config, bridge config, key files, credential files, and policy rules), see the [README](../../README.md#configuration-model).
+For detailed documentation on all configuration files (application plugin, deployment config, bridge config, key files, credential files, and policy rules), see the [README](../README.md#configuration-model).
 
 ---
 
@@ -1180,7 +1180,7 @@ The agent cannot reach GitHub write endpoints on its own. All writes route throu
 
 # Part 5 — Multi-User Hardening (Optional)
 
-> The single-user demo (Parts 1–4) is fully functional at this point. This section upgrades to separate macOS user accounts for true key isolation. For the security rationale (why separation matters and the recommended production topology), see the [README](../../README.md#why-workspace-separation-matters).
+> The single-user demo (Parts 1–4) is fully functional at this point. This section upgrades to separate macOS user accounts for true key isolation. For the security rationale (why separation matters and the recommended production topology), see the [README](../README.md#why-workspace-separation-matters).
 
 ## 5.1 What Lives Where
 
@@ -1596,3 +1596,14 @@ The operator retains: adapter key, deployment config, credentials, plugin, journ
 - Hermes Agent context files (`AGENTS.md`, `SOUL.md`): https://hermes-agent.nousresearch.com/docs/user-guide/features/context-files
 - Hermes `SOUL.md`: https://hermes-agent.nousresearch.com/docs/user-guide/features/personality
 - Claude Desktop: https://claude.ai/download
+
+
+## Optional P-256 identities
+
+The commands above keep Ed25519 as the baseline. Add `--suite P-256` when creating
+a new key filename to select P-256/ES256. This creates a different `did:jwk`;
+update the corresponding signer groups and key bindings explicitly. Key
+generation refuses to overwrite an existing file. Verifiers support both suites
+regardless of their own receipt-signing choice. Deploy dual-suite services before
+using P-256 identities. For the local SDK build order and mixed-suite checks, see
+[the demo signature-suite guide](../README.md#building-and-selecting-signature-suites).

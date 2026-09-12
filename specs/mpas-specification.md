@@ -268,11 +268,17 @@ DIDs are compared as exact strings on their canonical form (per DID Core, the me
 
 The `did:jwk` method does not mandate a canonical JWK serialization: the same public key can yield different identifiers depending on member order and optional members. The method's contract is that the minted DID string is the identifier of record ("store the fully serialized URI"). To make independent MPAS implementations mint identical DIDs for identical keys, MPAS fixes the derivation:
 
-1. Construct the minimal public JWK containing exactly the members required by RFC 7638 for the key type. For Ed25519 (OKP): `crv`, `kty`, `x`. Private members (`d`) MUST NOT be present.
+1. Construct the minimal public JWK containing exactly the members required by RFC 7638 for the key type. For Ed25519 (OKP): `crv`, `kty`, `x`. For P-256 (EC): `crv`, `kty`, `x`, `y`. Private members (`d`) MUST NOT be present.
 2. Canonicalize with JCS (RFC 8785). For the minimal member set this equals the RFC 7638 thumbprint input: members in lexicographic order, no whitespace, UTF-8.
 3. Encode the canonical bytes as base64url without padding and prefix with `did:jwk:`.
 
 This rule governs minting only. At verification time the DID string is compared exactly (5.1.5.1) and, for `did:jwk`, is the source of truth for the key: implementations resolve the verification key by base64url-decoding the method-specific identifier. A decoded JWK containing private key material MUST be rejected. Where a deployment also configures a `publicJwk` alongside a `did:jwk` identity, the key embedded in the DID is authoritative; implementations SHOULD reject configurations where the two disagree.
+
+Public keys MUST satisfy the suite validation rules in Section 5.5.6.1. Ed25519 `x` and P-256 `x` and `y` MUST be canonical unpadded base64url encoding of exactly 32 bytes. P-256 coordinates are unsigned big-endian field elements, including leading zero bytes; the point MUST be on P-256 and MUST NOT be the point at infinity. Compressed points, omitted `y`, out-of-range coordinates, and invalid points MUST be rejected. Any private material, including presence of `d` with an empty or null value, MUST be rejected in a received DID.
+
+Optional `alg`, `kid`, `use`, and `key_ops` MUST be omitted when minting a minimal DID. Optional metadata MAY occur in an existing received DID and MUST NOT alone cause rejection or identifier rewriting. If present, `alg` MUST match the key's suite, and `use`/`key_ops` MUST permit verification. Existing Ed25519 minting results MUST remain unchanged. A P-256 key produces a different identity; implementations MUST NOT silently replace an unavailable key or stored DID.
+
+P-256 minimal public JWK: `{"crv":"P-256","kty":"EC","x":"...","y":"..."}`. Fixed DID and artifact derivation vectors are published in [signature-suite conformance](../conformance/signature-suites/README.md).
 
 Test vector (Ed25519):
 
@@ -677,12 +683,12 @@ For `signature.format` = `"jws"`:
 * `signature.value` MUST contain a JWS Compact Serialization string.
 * `signature.payload` MUST be omitted (the JWS already contains the payload).
 * The JWS payload MUST be the JCS-canonicalized (RFC 8785) Canonical Approval Payload, encoded as the JWS payload per RFC 7515 Section 3 (base64url without padding).
-* The JWS header MUST contain `alg`.
-* The JWS header MUST contain `kid`.
+* The protected JWS header MUST contain `alg`.
+* The protected JWS header MUST contain `kid`.
 * The `alg` value MUST NOT be `none`. A Verifier MUST reject any JWS with `alg: none`.
-* A Verifier MUST reject any JWS whose `alg` value is not in the Verifier's permitted algorithm set.
-* EdDSA MUST be supported by conforming JWS implementations (mandatory-to-implement). ES256 and ES256K are RECOMMENDED.
-* The `kid` SHOULD be a DID URL identifying the signing key.
+* A Verifier MUST enforce the key-to-algorithm bindings in Section 5.5.6.1 and reject unknown algorithms and key/algorithm mismatches.
+* Conforming verifiers MUST verify both Ed25519/EdDSA and P-256/ES256. A deployment MUST NOT disable verification of either suite.
+* The `kid` MUST identify a key authorized for the signer DID. For `did:jwk`, it MUST be the exact signer DID followed by `#0`.
 * The JWS header MAY contain `jwk` for offline or durable verification. However, an embedded `jwk` MUST NOT by itself establish signer authority. An embedded `jwk` MAY assist verification only if the key is independently authorized by DID resolution, trusted key binding, OMATrust, local configuration, or another verifier-trusted identity/key authorization mechanism.
 * A Verifier MUST reject a Signature Approval if the signing key is not authorized for the signer DID or approval role under trusted policy/configuration.
 
@@ -706,6 +712,23 @@ Example:
   "createdAt": "2026-05-27T18:10:00.000Z"
 }
 ```
+
+##### 5.5.6.1 Signature Suites
+
+| Public-key suite | Public JWK | Protected JWS `alg` | Raw signature encoding |
+|---|---|---|---|
+| Ed25519 | `kty: "OKP"`, `crv: "Ed25519"`, `x` | `EdDSA` | 64 bytes |
+| P-256 | `kty: "EC"`, `crv: "P-256"`, `x`, `y` | `ES256` | 64-byte unsigned big-endian `R || S`, each integer padded to 32 bytes |
+
+These are the complete allowed suites. ES256K, unknown algorithms, and other curves MUST be rejected. An implementation MUST NOT load additional cryptographic suites through configuration; adding a suite requires a future specification change and conformance vectors.
+
+Resolve the trusted public key and validate its type, curve, parameters, encoding, and lengths before selecting its suite. The protected `alg` MUST match that suite; an incoming `alg` MUST NOT independently select a crypto operation. Unknown or ambiguous suite matches MUST fail closed. Public keys MUST contain no private material. Optional key metadata cannot override the suite, and if present MUST permit the operation. Local private-key imports MUST validate a 32-byte `d`, P-256 scalar range, and public/private consistency.
+
+Conforming verifiers MUST verify both suites, independently of the suite they use to issue receipts or other signatures. Signing implementations MAY generate either suite; signing configuration MUST reject unknown suite names and MUST NOT disable verification of a specified suite. Supporting a suite does not establish identity or Approval authority.
+
+P-256 signing MUST apply SHA-256 exactly once to the RFC 7515 JWS signing input. Callers supply complete payload/message bytes, not precomputed digests; provider adapters MUST prevent double hashing and convert provider-internal encoding to the required wire encoding. Non-exporting providers MUST not be required to disclose private keys. Approvals and receipts retain identical payload canonicalization and object models across suites.
+
+Verification MUST enforce the 64-byte signature length and ECDSA scalar validity, and MUST NOT accept ASN.1 DER as an alternative wire encoding. No low-S-only requirement is added. ECDSA signing need not be deterministic: conformance verifies fixed signatures and independently checks at least one ES256 vector; fresh signatures are verified, not compared against one expected byte sequence.
 
 #### 5.5.7 Verification Notes
 
@@ -1031,8 +1054,8 @@ A Verifier or Application MAY define additional result values.
 * `signature` MUST contain a JWS Compact Serialization string.
 * `payload` MUST be omitted.
 * The JWS payload MUST be the JCS-canonicalized (RFC 8785) Receipt Payload, encoded as the JWS payload per RFC 7515 Section 3 (base64url without padding).
-* The JWS header MUST contain `alg` and `kid`.
-* The `kid` SHOULD be a DID URL identifying the receipt signing key.
+* The protected JWS header MUST contain `alg` and `kid`.
+* The `kid` MUST identify a key authorized for `issuerDid`; for `did:jwk`, it MUST be the exact issuer DID followed by `#0`.
 * JWS Execution Receipts MUST follow the algorithm and key authorization requirements in Section 5.5.6.
 
 #### 5.9.7 Verification Notes
@@ -1960,8 +1983,8 @@ The following structural constraints are derived from the entire specification â
 
 ### From Section 5.5.6 (JWS rules â€” inside JWS, not outer-schema-enforceable)
 - `alg` MUST NOT be `"none"`.
-- JWS header MUST contain `alg` and `kid`.
-- EdDSA mandatory-to-implement; ES256, ES256K recommended.
+- Protected JWS header MUST contain `alg` and an authorized `kid`.
+- Verifiers MUST verify Ed25519/EdDSA and P-256/ES256, with no verifier-side suite disablement. Signers MAY use either. Other suites, including ES256K, MUST be rejected (5.5.6.1).
 - Embedded `jwk` MUST NOT alone establish signer authority.
 
 ### From Section 5.6 (Approval Bundle)
@@ -2631,7 +2654,7 @@ All standalone schemas use `$ref` to definitions. The combined `mpas-base-0.2.sc
 | 18  | MPAS objects MUST be JCS-canonicalized (RFC 8785) before hashing/signing                        | Processing requirement, not structural.                                                     |
 | 19  | Duplicate JSON keys MUST be rejected                                                            | Requires conformance-mode parser; most parsers silently accept duplicates.                  |
 | 20  | Credential Adapter MUST NOT allow Execution Payload to select credentials                       | Implementation architecture constraint.                                                     |
-| 21  | EdDSA MUST be supported by conforming JWS implementations                                       | Implementation capability.                                                                  |
+| 21  | Ed25519/EdDSA and P-256/ES256 MUST both be verified (5.5.6.1)                                       | Implementation capability.                                                                  |
 | 22  | Receipt signing key MUST be authorized for `issuerDid`                                          | Runtime key-authorization check.                                                            |
 | 23  | Verifier MUST reject unsupported or unrecognized hash algorithms                                | Runtime algorithm-support check (schema only covers the known-safe enum).                   |
 

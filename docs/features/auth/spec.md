@@ -1,10 +1,17 @@
 # MPAS Coordination Authentication — Specification
 
+> Signature-suite update: [ES256 specification](../es256/spec.md) supersedes
+> Ed25519-only algorithm guidance and the earlier SHOULD-omit-`alg` sender rule.
+> New senders include `alg`; absent HTTP `alg` means `ed25519` without changing
+> the signature base. Verifiers support both specified suites. Historical
+> completed tasks and unchanged absent-`alg` fixtures below record the original implementation.
+
+
 **Status:** Draft
 **Issue:** [#3 — Add signature-based authentication to Coordination poll API](https://github.com/oma3dao/mpas/issues/3)
 **Affects:** `specs/mpas-profile-http.md`, `sdk/protocol/`, `examples/demo/src/coordination/`
 **Downstream:** [`wivity/mpas-coordination-server`](https://github.com/wivity/mpas-coordination-server)
-**Mechanism:** RFC 9421 HTTP Message Signatures, Ed25519, `keyid` = caller DID
+**Mechanism:** RFC 9421 HTTP Message Signatures, Ed25519 and P-256, `keyid` = caller DID
 **Decisions:** [`decisions.md`](./decisions.md)
 
 ---
@@ -72,7 +79,7 @@ expires=1754400060;keyid="did:jwk:...";nonce="f9a3c1b7e2d4508a";tag="mpas-v1"
 | AUTH-02 | `@authority` and `@target-uri` MUST NOT be covered (proxy rewriting; see [decisions.md §4](./decisions.md#4-why-audience-lives-in-the-body-not-authority)). |
 | AUTH-03 | `keyid` MUST be the caller's `did:jwk` DID. The embedded JWK MUST be public-only; any private key material MUST be rejected. |
 | AUTH-04 | The verification key MUST be derived from `keyid` via the MPAS `did:jwk` decoding rule. No DID document is fetched; no resolver is invoked. |
-| AUTH-05 | The algorithm is EdDSA, derived from the Ed25519 key in the `did:jwk`. If `alg` is present in signature parameters, it MUST equal `ed25519` — any other value MUST be rejected. Signers SHOULD omit it (HTTP profile §4.6.2); verifiers MUST accept both forms. Future key types define their own algorithm binding. |
+| AUTH-05 | Derive the suite from the public key in `keyid`. New senders MUST include `alg="ed25519"` or `alg="ecdsa-p256-sha256"` as appropriate. Absent `alg` claims `ed25519` without inserting it into the signature base; a P-256 key therefore requires explicit `alg`. Verifiers MUST support both suites and reject all mismatches. |
 | AUTH-06 | `created` and `expires` MUST be present integer timestamps. `expires` MUST be strictly greater than `created`, and `expires - created` MUST NOT exceed 60 seconds. |
 | AUTH-07 | `nonce` MUST be present on all four protocol endpoints. |
 | AUTH-08 | Signers MUST set `tag="mpas-v1"`; the tag identifies the MPAS application profile and is covered by `@signature-params`. A verifier MUST select exactly one tagged `Signature-Input` member and require a same-label `Signature` member. The label SHOULD be `mpas`, but any matching label conforms. Zero or multiple MPAS candidates MUST be rejected. |

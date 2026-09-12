@@ -1,3 +1,4 @@
+import { samePublicKey, validatePublicJwk } from "@oma3/mpas";
 import { readdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { Ajv2020 } from "ajv/dist/2020.js";
@@ -360,7 +361,14 @@ async function loadDeploymentConfigFile(
       } catch (error) {
         return loadError("CONFIG_SCHEMA_INVALID", `signerKeys: invalid did:jwk for ${signer.label ?? signer.did}: ${error instanceof Error ? error.message : String(error)}`, filePath);
       }
-      if (signer.publicJwk && signer.publicJwk.x !== embedded.x) {
+      let matches = true;
+      try {
+        if (signer.publicJwk) {
+          validatePublicJwk(signer.publicJwk, "verify");
+          matches = samePublicKey(signer.publicJwk, embedded);
+        }
+      } catch { matches = false; }
+      if (!matches) {
         return loadError(
           "CONFIG_SCHEMA_INVALID",
           `signerKeys: publicJwk does not match the key embedded in did:jwk for ${signer.label ?? signer.did}. The DID is the source of truth; remove or correct publicJwk.`,
@@ -368,11 +376,10 @@ async function loadDeploymentConfigFile(
         );
       }
     } else if (!signer.publicJwk) {
-      return loadError(
-        "CONFIG_SCHEMA_INVALID",
-        `signerKeys: publicJwk is required for non-did:jwk DID ${signer.did}.`,
-        filePath,
-      );
+      return loadError("CONFIG_SCHEMA_INVALID", `signerKeys: publicJwk is required for non-did:jwk DID ${signer.did}.`, filePath);
+    } else {
+      try { validatePublicJwk(signer.publicJwk, "verify"); }
+      catch { return loadError("CONFIG_SCHEMA_INVALID", "signerKeys: invalid public JWK.", filePath); }
     }
   }
 

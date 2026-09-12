@@ -64,8 +64,8 @@ the published alpha API. New integrations should use the canonical names above.
 
 ### Key Management (`lib/key-manager.ts`, `lib/did-key.ts`)
 
-- `KeyManager` — load Ed25519 keys from file, derive `did:jwk`, sign/verify JWS
-- `deriveDidKey`, `generateEd25519Key`, `didKeyToKid` — DID utilities
+- `KeyManager` — load Ed25519 or P-256 keys, preserve `did:jwk`, sign/verify JWS and raw bytes
+- `deriveDidJwk`, `didJwkToJwk`, `didJwkToKid`, `generateEd25519Key`, `generateP256Key`, `generateMpasKey` — DID and key utilities
 
 ### Proposer Bridge Runtime (`lib/bridge-runtime.ts`, `lib/mcp-protocol-server.ts`, `lib/mcp-tasks-server.ts`, `lib/mcp-compatibility-server.ts`, `lib/workflow-engine.ts`, `lib/workflow-store.ts`)
 
@@ -549,3 +549,78 @@ server modules.
 `verification.ts` does not need it. The dividing line is whether the module
 constructs and signs artifacts (signer side) or transports and verifies them
 (protocol side).
+
+
+## Signature suites and signer providers
+
+Version `0.1.0-alpha.13` adds P-256/ES256 alongside Ed25519/EdDSA. Every verifier
+supports both; there is no verifier suite allow-list. Signing configuration
+selects a key/suite, and unknown or mismatched selections fail closed.
+Ed25519 remains the default for key generation.
+
+```ts
+import {
+  generateP256Key, KeyManager, ApprovalBuilder, buildAndSignExecutionReceipt,
+  verifyExecutionReceipt,
+} from "@oma3/mpas";
+
+const key = await generateP256Key();
+const signer = KeyManager.fromJwk(key.privateJwk, { suite: "P-256" });
+const publicOnly = KeyManager.fromJwk(key.publicJwk);
+const approvalBuilder = new ApprovalBuilder({ signer });
+// With an existing Action Envelope and its exact Execution Payload:
+const approval = await approvalBuilder.buildApproval(actionEnvelope, "approve");
+const receipt = await buildAndSignExecutionReceipt({
+  signer, verifierDid: signer.did, actionEnvelope, executionPayload,
+  result: { result: "executed" },
+});
+const valid = await verifyExecutionReceipt(receipt, {
+  verifier: { did: signer.did }, actionEnvelope, executionPayload,
+});
+```
+
+`KeyManager.fromFile(path)` retains stored `did:jwk` strings, including valid
+optional public metadata; it rejects stored identity/key mismatches. A separate
+`publicJwk` in the key file must match every coordinate. `fromJwk` can receive an
+explicit trusted identity in `{ did }`. For a non-`did:jwk` identity, a configured
+`kid` is required and the caller remains responsible for that trusted key binding;
+this adds no network resolver. Public-only managers verify and reject signing.
+
+`MpasSigner` combines `MpasJwsSigner` and `MpasRawSigner`. The contract exposes
+`did`, `kid`, `algorithm` (`EdDSA` or `ES256`), and `publicKey`, plus:
+
+- `signCompactJws(payload: Uint8Array): Promise<string>`: complete payload bytes
+  in; complete compact JWS out.
+- `signBytes(message: Uint8Array): Promise<Uint8Array>`: complete message bytes
+  in; raw signature bytes out.
+
+Builders use `MpasJwsSigner`; HTTP clients use the raw capability. Neither asks
+for private key material. `signMpasCompactJws` and `signMpasBytes` validate provider
+metadata and returned key, payload, and signature bindings. A provider may keep
+its private key non-exportable. The test suite includes a Web Crypto provider
+whose private CryptoKey cannot be exported.
+
+Do not pre-hash inputs. For ES256, the signing operation hashes the complete JWS
+`header.payload` input or raw HTTP signature base with SHA-256 exactly once.
+Provider adapters must account for digest APIs and convert provider-internal DER
+signatures to 64-byte raw `R || S`. Wire verifiers never accept DER. Fresh ECDSA
+signatures can differ while remaining valid.
+
+Existing `new ApprovalBuilder({ keyManager })`, `ActionPackageBuilder` with
+`keyManager`, receipt `signingKey` inputs, and `KeyManager.sign()`/`verify()` aliases
+remain supported through the shared implementation. Supply exactly one signer
+input; ambiguous old/new inputs are rejected. Low-level Approval verification
+accepts an optional expected signer DID when it differs from the minimal minted
+DID; bundle verification uses the exact configured trusted DID automatically.
+
+Every new HTTP request includes `alg="ed25519"` or
+`alg="ecdsa-p256-sha256"`. Absent HTTP `alg` means claimed `ed25519`; reconstruct
+the signature base without adding that parameter. P-256 requires explicit
+`alg`. JWS always requires protected `alg` and an authorized `kid`. The original
+HTTP `did` + `signBytes` call shape remains supported by deriving public metadata
+from the DID, without duplicating the signer-provider abstraction.
+
+P-256 identities require dual-suite services before registration/use. Registering
+one is explicit identity rotation: it does not preserve an existing Ed25519 DID.
+Retain existing Ed25519 identities and fixtures. See the [feature specification](../../docs/features/es256/spec.md)
+and [conformance fixtures](../../conformance/signature-suites/README.md).

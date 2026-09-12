@@ -129,7 +129,7 @@ export class SignerServer {
           return errorResult("REVIEW_SET_INTEGRITY_ERROR", integrityError, { actionId });
         }
 
-        const approvalBuilder = new ApprovalBuilder({ keyManager });
+        const approvalBuilder = new ApprovalBuilder({ signer: keyManager });
         const approval = await approvalBuilder.buildApproval(
           reviewSet.actionEnvelope,
           toolName === "mpas_approve" ? "approve" : "reject",

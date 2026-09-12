@@ -134,7 +134,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<StartedD
     configsByApplicationDid: loaded.configsByApplicationDid,
     credentialProvider: new FileCredentialProvider(options.credentialDir ?? defaultCredentialDir()),
     adapterDid: adapterKey.did,
-    adapterSigningKey: adapterKey.privateJwk,
+    adapterSigner: KeyManager.fromJwk(adapterKey.privateJwk, { did: adapterKey.did }),
     maxEnvelopeValidityMs: options.maxEnvelopeValidityMs,
     ledger,
     traceLogger,
@@ -143,7 +143,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<StartedD
   let verifierRelayWorker: VerifierRelayWorker | undefined;
   const verifierRelayUrl = options.verifierRelayUrl ?? options.verifierCoordinationUrl;
   if (verifierRelayUrl) {
-    const keyManager = KeyManager.fromJwk(adapterKey.privateJwk);
+    const keyManager = KeyManager.fromJwk(adapterKey.privateJwk, { did: adapterKey.did });
     if (keyManager.did !== adapterKey.did) {
       throw new Error(
         `Adapter key DID ${adapterKey.did} does not match the DID derived from its private key ${keyManager.did}.`,
@@ -174,7 +174,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<StartedD
         if (recovery?.resolution === "indeterminate") {
           const response = await buildIndeterminateRecoveryResponse(actionPackage, {
             adapterDid: adapterKey.did,
-            adapterSigningKey: adapterKey.privateJwk,
+            adapterSigner: KeyManager.fromJwk(adapterKey.privateJwk, { did: adapterKey.did }),
           });
           ledger.resolve(actionId, "indeterminate", response);
           return response;
@@ -280,10 +280,11 @@ export async function loadAdapterKey(path: string): Promise<AdapterKeyFile> {
     throw new Error(`Adapter key file is invalid: ${path}`);
   }
 
+  const manager = await KeyManager.fromFile(path);
   return {
-    did: parsed.did,
+    did: manager.did,
     privateJwk: parsed.privateJwk,
-    publicJwk: parsed.publicJwk,
+    publicJwk: manager.publicKey,
   };
 }
 

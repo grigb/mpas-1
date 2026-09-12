@@ -1,7 +1,10 @@
-import { compactVerify, decodeProtectedHeader, importJWK, type JWK } from "jose";
+import type { JWK } from "jose";
+import { canonicalize } from "json-canonicalize";
+import { verifySuiteCompactJws } from "./signature-suites.js";
+import { verificationKid } from "./signer.js";
 import { deriveDidJwk, didJwkToJwk, isDidJwk } from "./did-jwk.js";
 import type { ActionEnvelope, ActionPackage, Approval, CanonicalApprovalPayload, Did } from "../types/mpas.js";
-import type { ExecutionPayload, Hash } from "../types/mpas.js";
+import type { ExecutionPayload, Hash, ExecutionReceipt } from "../types/mpas.js";
 import type { VerificationTraceCallback } from "./trace.js";
 import { computeJsonHash } from "../utils/hash.js";
 import { strictJsonParse } from "../utils/strict-json.js";
@@ -281,19 +284,13 @@ export function verifyPayloadBinding(payload: ExecutionPayload, envelope: Action
   return hashesEqual(computeJsonHash(payload), envelope.executionPayloadHash);
 }
 
-export async function verifyApprovalSignature(approval: Approval, publicKey: JWK): Promise<boolean> {
+export async function verifyApprovalSignature(approval: Approval, publicKey: JWK, signerDid?: Did): Promise<boolean> {
   if (approval.signature.format !== "jws") {
     return false;
   }
 
   try {
-    const protectedHeader = decodeProtectedHeader(approval.signature.value);
-    if (protectedHeader.alg === "none" || protectedHeader.alg !== "EdDSA") {
-      return false;
-    }
-
-    const key = await importJWK(publicKey, protectedHeader.alg);
-    await compactVerify(approval.signature.value, key);
+    await verifySuiteCompactJws(approval.signature.value, publicKey, verificationKid(publicKey, signerDid));
     return true;
   } catch {
     return false;
@@ -307,15 +304,15 @@ export async function verifyApprovalSignature(approval: Approval, publicKey: JWK
  * needed. This function additionally verifies the Action hash, decision, timestamp,
  * and signer DID carried by the signed Approval payload.
  */
-export async function verifyApproval(approval: Approval, signerPublicKey: JWK): Promise<boolean> {
-  if (!(await verifyApprovalSignature(approval, signerPublicKey))) return false;
+export async function verifyApproval(approval: Approval, signerPublicKey: JWK, signerDid?: Did): Promise<boolean> {
+  if (!(await verifyApprovalSignature(approval, signerPublicKey, signerDid))) return false;
   try {
-    const payload = await verifiedApprovalPayload(approval, signerPublicKey);
+    const payload = await verifiedApprovalPayload(approval, signerPublicKey, signerDid);
     return (
       hashesEqual(payload.actionEnvelopeHash, approval.actionEnvelopeHash) &&
       payload.decision === approval.decision &&
       payload.createdAt === approval.createdAt &&
-      payload.signerDid === deriveDidJwk(signerPublicKey)
+      payload.signerDid === (signerDid ?? deriveDidJwk(signerPublicKey))
     );
   } catch {
     return false;
@@ -368,11 +365,11 @@ export async function verifyApprovalBundle(
       );
     }
 
-    if (!(await verifyApprovalSignature(approval, signerJwk))) {
+    if (!(await verifyApprovalSignature(approval, signerJwk, trustedSigner.did))) {
       return approvalBundleError("INVALID_SIGNATURE", "Approval signature could not be verified.", `${path}.signature`);
     }
 
-    const verifiedPayload = await verifiedApprovalPayload(approval, signerJwk);
+    const verifiedPayload = await verifiedApprovalPayload(approval, signerJwk, trustedSigner.did);
     if (
       !hashesEqual(verifiedPayload.actionEnvelopeHash, approval.actionEnvelopeHash) ||
       verifiedPayload.decision !== approval.decision ||
@@ -651,9 +648,40 @@ function decodeApprovalPayload(approval: Approval): CanonicalApprovalPayload | n
   }
 }
 
-async function verifiedApprovalPayload(approval: Approval, publicKey: JWK): Promise<CanonicalApprovalPayload> {
-  const protectedHeader = decodeProtectedHeader(approval.signature.value);
-  const key = await importJWK(publicKey, protectedHeader.alg);
-  const { payload } = await compactVerify(approval.signature.value, key);
+async function verifiedApprovalPayload(approval: Approval, publicKey: JWK, signerDid?: Did): Promise<CanonicalApprovalPayload> {
+  const payload = await verifySuiteCompactJws(approval.signature.value, publicKey, verificationKid(publicKey, signerDid));
   return strictJsonParse(Buffer.from(payload).toString("utf8")) as CanonicalApprovalPayload;
+}
+
+export interface VerifyExecutionReceiptOptions {
+  /** Trusted issuer binding; received receipt headers never establish trust. */
+  verifier: TrustedSigner;
+  actionEnvelope: ActionEnvelope;
+  executionPayload: ExecutionPayload;
+  /** Additional application-defined results accepted by the caller. */
+  additionalResults?: readonly string[];
+}
+
+/** Verify receipt issuer, protected signature, payload structure, and expected Action. */
+export async function verifyExecutionReceipt(receipt: ExecutionReceipt, options: VerifyExecutionReceiptOptions): Promise<boolean> {
+  try {
+    if (receipt.version !== "1" || receipt.type !== "ExecutionReceipt" || receipt.format !== "jws" || hasOwn(receipt as unknown as Record<string, unknown>, "payload")) return false;
+    const key = resolveTrustedSignerJwk(options.verifier);
+    if (!key) return false;
+    const bytes = await verifySuiteCompactJws(receipt.signature, key, verificationKid(key, options.verifier.did));
+    const payload = strictJsonParse(Buffer.from(bytes).toString("utf8"));
+    if (!isRecord(payload) || !isRecord(payload.actionEnvelopeHash) || !isRecord(payload.executionPayloadHash) ||
+        (payload.actionId !== undefined && !isRecord(payload.actionId)) || !isMpasTimestamp(payload.issuedAt) ||
+        (payload.executionRef !== undefined && typeof payload.executionRef !== "string")) return false;
+    if (Object.keys(payload).some((key) => !["issuerDid", "actionEnvelopeHash", "executionPayloadHash", "actionId", "proposerDid", "result", "issuedAt", "executionRef"].includes(key))) return false;
+    const results: readonly string[] = ["executed", "failed", "indeterminate", "rejected", "expired", "cancelled", "revoked", ...(options.additionalResults ?? [])];
+    if (typeof payload.result !== "string" || !results.includes(payload.result)) return false;
+    const { actionEnvelope, executionPayload, verifier } = options;
+    return payload.issuerDid === verifier.did &&
+      (payload.proposerDid === undefined || payload.proposerDid === actionEnvelope.proposer.did) &&
+      (payload.actionId === undefined || canonicalize(payload.actionId) === canonicalize(actionEnvelope.actionId)) &&
+      hashesEqual(payload.actionEnvelopeHash as unknown as Hash, computeJsonHash(actionEnvelope)) &&
+      hashesEqual(payload.executionPayloadHash as unknown as Hash, computeJsonHash(executionPayload)) &&
+      verifyPayloadBinding(executionPayload, actionEnvelope);
+  } catch { return false; }
 }

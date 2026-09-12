@@ -11,7 +11,9 @@ import {
 } from "structured-headers";
 import type { Did } from "../types/mpas.js";
 import { didJwkToJwk } from "./did-jwk.js";
-import { KeyManager } from "./key-manager.js";
+import { resolveHttpSigner, signMpasBytes, type MpasHttpSigner } from "./signer.js";
+import { validatePublicJwk, verifySuiteBytes } from "./signature-suites.js";
+import type { JWK } from "jose";
 
 export const MPAS_SIGNATURE_TAG = "mpas-v1";
 export const MPAS_SIGNATURE_LABEL = "mpas";
@@ -21,10 +23,7 @@ export const MPAS_MAX_SIGNATURE_LIFETIME_SECONDS = 60;
 export type MpasHeaderValue = string | string[] | number | undefined;
 export type MpasHeaders = Record<string, MpasHeaderValue>;
 
-export interface MpasRfc9421Signer {
-  readonly did: Did;
-  signBytes(payload: Uint8Array): Promise<Uint8Array>;
-}
+export type MpasRfc9421Signer = MpasHttpSigner;
 
 export interface SignMpasRfc9421Options {
   method: string;
@@ -114,6 +113,8 @@ export class InMemoryNonceStore implements NonceStore {
 }
 
 export async function signMpasRfc9421(options: SignMpasRfc9421Options): Promise<Record<string, string>> {
+  const signer = resolveHttpSigner(options.signer);
+  const suite = validatePublicJwk(signer.publicKey);
   const created = options.created ?? new Date();
   const lifetimeSeconds = options.lifetimeSeconds ?? MPAS_MAX_SIGNATURE_LIFETIME_SECONDS;
   validateLifetime(lifetimeSeconds);
@@ -132,18 +133,19 @@ export async function signMpasRfc9421(options: SignMpasRfc9421Options): Promise<
     {
       name: label,
       fields: [...MPAS_COVERED_COMPONENTS],
-      params: ["created", "expires", "keyid", "nonce", "tag"],
+      params: ["created", "expires", "keyid", "nonce", "tag", "alg"],
       paramValues: {
         created,
         expires,
         keyid: options.signer.did,
         nonce,
         tag: MPAS_SIGNATURE_TAG,
+        alg: suite.httpSignatureAlgorithm,
       },
       key: {
         id: options.signer.did,
         async sign(data) {
-          return Buffer.from(await options.signer.signBytes(data));
+          return Buffer.from(await signMpasBytes(signer, data));
         },
       },
     },
@@ -212,7 +214,7 @@ export async function verifyMpasRfc9421(options: VerifyMpasRfc9421Options): Prom
     typeof keyid !== "string" ||
     typeof nonce !== "string" ||
     tag !== MPAS_SIGNATURE_TAG ||
-    (alg !== undefined && alg !== "ed25519")
+    (alg !== undefined && typeof alg !== "string")
   ) {
     return authFailure("parameters_invalid");
   }
@@ -232,9 +234,11 @@ export async function verifyMpasRfc9421(options: VerifyMpasRfc9421Options): Prom
     return authFailure("freshness_invalid");
   }
 
-  let keyManager: KeyManager;
+  let publicKey: JWK;
   try {
-    keyManager = KeyManager.fromJwk(didJwkToJwk(keyid));
+    publicKey = didJwkToJwk(keyid);
+    const suite = validatePublicJwk(publicKey, "verify");
+    if ((alg ?? "ed25519") !== suite.httpSignatureAlgorithm) return authFailure("parameters_invalid");
   } catch {
     return authFailure("key_invalid");
   }
@@ -253,7 +257,7 @@ export async function verifyMpasRfc9421(options: VerifyMpasRfc9421Options): Prom
   }
 
   const signatureBytes = new Uint8Array(signatureItem[0]);
-  if (!(await keyManager.verifyBytes(Buffer.from(signatureBase, "utf8"), signatureBytes))) {
+  if (!(verifySuiteBytes(publicKey, Buffer.from(signatureBase, "utf8"), signatureBytes))) {
     return authFailure("signature_unverifiable");
   }
 

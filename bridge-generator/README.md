@@ -8,16 +8,25 @@ Contracts for everything emitted are specified in [`docs/features/bridge-generat
 
 - Node.js >= 22
 - The upstream MCP server runnable from your shell (any command: `node`, `npx`, `docker run -i`, a binary)
-- For building generated bridges: npm access to the public `@oma3/mpas` SDK
+- For building generated bridges: SDK `0.1.0-alpha.13` or later, either published
+  to npm or built locally. The candidate release must be published before a
+  generated package can install it from the registry.
 
 ## Setup
 
 ```sh
-cd bridge-generator
-npm install
+cd sdk/protocol
+npm ci
 npm run build
-npm test          # 53 tests; all should pass
+cd ../../bridge-generator
+npm ci
+npm run build
+npm test
 ```
+
+The generated-bridge integration test builds against the repository's candidate
+SDK and checks P-256 signatures for direct submission, relay submission, and
+relay polling. Build the SDK first, as shown above.
 
 ## Two modes
 

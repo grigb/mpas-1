@@ -71,3 +71,7 @@ export * from "./lib/receipt-builder.js";
 export * from "./lib/auth-requirements-builder.js";
 export * from "./lib/did-jwk.js";
 export * from "./lib/trace.js";
+
+export * from "./lib/signer.js";
+export { getSignatureSuite, resolveSignatureSuite, validatePublicJwk, normalizePublicJwk, samePublicKey } from "./lib/signature-suites.js";
+export type { SignatureSuiteId, MpasJwsAlgorithm, MpasHttpSignatureAlgorithm, MpasSignatureSuite } from "./lib/signature-suites.js";

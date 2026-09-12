@@ -135,6 +135,7 @@ export class GeneratedBridge {
       ? relayActionEndpoint(config.actionEndpoint, keyManagerPromise, submissionTimeoutMs)
       : new ActionEndpointClient({
           url: config.adapterUrl,
+          signer: keyManagerPromise,
           ...(submissionTimeoutMs !== undefined ? { timeoutMs: submissionTimeoutMs } : {}),
         });
     const coordinationService: WorkflowCoordinationService = config.coordinationUrl
@@ -159,7 +160,7 @@ export class GeneratedBridge {
       const actionPackageBuilder = new ActionPackageBuilder({
         applicationDid: config.applicationDid,
         executionProfile,
-        keyManager,
+        signer: keyManager,
         ...(config.defaultExpirationMinutes !== undefined
           ? { defaultExpirationMinutes: config.defaultExpirationMinutes }
           : {}),

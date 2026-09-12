@@ -477,3 +477,14 @@ strings are never printed.
 - [JSON Verifier Policy Profile](../../../specs/mpas-profile-policy-json.md) — policy match conditions, requirement types, signer groups
 - [Application Plugin Profile](../../../specs/mpas-profile-application-plugin.md) — plugin schema reference
 - [mpas-applications repository](https://github.com/oma3dao/mpas-applications) — contributed application plugins, bridges, and adapter-config templates
+
+
+### Receipt signature suite
+
+The adapter may issue receipts with Ed25519 or P-256 (`key generate ... --suite
+P-256`). Its configured key determines the signing suite. It always verifies
+both suites for eligible participant identities. Register a newly generated DID
+explicitly; it does not replace an Ed25519 DID automatically. Programmatic
+adapters may supply `adapterSigner` instead of `adapterSigningKey` for a shared
+non-exporting signer. The two inputs are mutually exclusive. See the [SDK signer
+contract](../../../sdk/protocol/README.md#signature-suites-and-signer-providers).

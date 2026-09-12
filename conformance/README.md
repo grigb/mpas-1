@@ -41,4 +41,4 @@ Validates the cryptographic and policy behavior of an adapter under test:
 
 ## Status
 
-Placeholder. The conformance tools and certification program are future work. The subfolder structure will be defined when implementation begins.
+Signature fixtures and checks are available in [HTTP Message Signatures](http-message-signatures/README.md) and [signature suites](signature-suites/README.md), including an independent OpenSSL verification command. The broader conformance tools and certification program remain future work.

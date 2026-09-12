@@ -1,4 +1,6 @@
-import { CompactSign, importJWK, type JWK } from "jose";
+import type { JWK } from "jose";
+import { KeyManager } from "./key-manager.js";
+import { signMpasCompactJws, validateSignerIdentity, type MpasJwsSigner } from "./signer.js";
 import { canonicalize } from "json-canonicalize";
 import type { ActionEnvelope, Did, ExecutionPayload, ExecutionReceipt, ReceiptPayload, ReceiptResult } from "../types/mpas.js";
 import { computeJsonHash } from "./verification.js";
@@ -18,8 +20,10 @@ export interface BuildAndSignExecutionReceiptInput {
   result: ReceiptBuildResult;
   /** DID of the Verifier that performed or authorized execution. */
   verifierDid: Did;
-  /** Ed25519 private JWK used to produce the compact JWS receipt. */
-  signingKey: JWK;
+  /** Compatibility input: constructs a local signer. Supply exactly one input. */
+  signingKey?: JWK;
+  /** Shared signer, including non-exporting providers. */
+  signer?: MpasJwsSigner;
 }
 
 /**
@@ -32,6 +36,10 @@ export async function buildAndSignExecutionReceipt(
   input: BuildAndSignExecutionReceiptInput,
 ): Promise<ExecutionReceipt> {
   const { actionEnvelope, executionPayload, result, verifierDid, signingKey } = input;
+  if (Boolean(input.signer) === Boolean(signingKey)) throw new Error("Supply exactly one signer or signingKey.");
+  const signer = input.signer ?? KeyManager.fromJwk(signingKey!, { did: verifierDid });
+  validateSignerIdentity(signer);
+  if (signer.did !== verifierDid) throw new Error("Receipt signer does not match verifierDid.");
   const receiptPayload: ReceiptPayload = {
     issuerDid: verifierDid,
     actionEnvelopeHash: computeJsonHash(actionEnvelope),
@@ -43,10 +51,7 @@ export async function buildAndSignExecutionReceipt(
     executionRef: result.executionRef,
   };
 
-  const key = await importJWK(signingKey, "EdDSA");
-  const signature = await new CompactSign(Buffer.from(canonicalize(receiptPayload)))
-    .setProtectedHeader({ alg: "EdDSA", kid: signingKey.kid })
-    .sign(key);
+  const signature = await signMpasCompactJws(signer, Buffer.from(canonicalize(receiptPayload)));
 
   return {
     version: "1",

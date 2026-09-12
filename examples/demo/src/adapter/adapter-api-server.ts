@@ -1,6 +1,6 @@
 import Fastify, { type FastifyInstance, type FastifyReply, type RouteHandlerMethod } from "fastify";
 import type { JWK } from "jose";
-import { parseActionRequest, parseActionRequestEnvelope, strictJsonParse, validateMcpPayloadStructure } from "@oma3/mpas";
+import { KeyManager, validateSignerIdentity, type MpasJwsSigner, parseActionRequest, parseActionRequestEnvelope, strictJsonParse, validateMcpPayloadStructure } from "@oma3/mpas";
 import { buildAuthorizationRequirements } from "../core/auth-requirements-builder.js";
 import { checkProposerAuthorization, evaluatePolicy, type PolicyConfig } from "../core/policy-engine.js";
 import { validatePayloadAgainstPlugin } from "../core/plugin-loader.js";
@@ -35,13 +35,20 @@ export interface HttpEndpointOptions {
   configsByApplicationDid: Map<Did, LoadedDeploymentConfig>;
   credentialProvider: FileCredentialProvider;
   adapterDid: Did;
-  adapterSigningKey: JWK;
+  /** Compatibility input; use adapterSigner for non-exporting providers. */
+  adapterSigningKey?: JWK;
+  adapterSigner?: MpasJwsSigner;
   ledger?: DispatchLedger;
   maxEnvelopeValidityMs?: number;
   traceLogger?: TraceLogger;
 }
 
 export function createAdapterApiServer(options: HttpEndpointOptions): FastifyInstance {
+  if (Boolean(options.adapterSigner) === Boolean(options.adapterSigningKey)) throw new Error("Supply exactly one adapterSigner or adapterSigningKey.");
+  const adapterSigner = options.adapterSigner ?? KeyManager.fromJwk(options.adapterSigningKey!, { did: options.adapterDid });
+  validateSignerIdentity(adapterSigner);
+  if (adapterSigner.did !== options.adapterDid) throw new Error("Adapter signer does not match adapter DID.");
+  options = { ...options, adapterSigner, adapterSigningKey: undefined };
   const app = Fastify({ logger: false });
   const ledger = options.ledger ?? new DispatchLedger();
   const maxEnvelopeValidityMs = options.maxEnvelopeValidityMs ?? DEFAULT_MAX_ENVELOPE_VALIDITY_MS;
@@ -508,7 +515,7 @@ function actionResponse(
 /** Builds the terminal response for an execution left unresolved by a process crash. */
 export async function buildIndeterminateRecoveryResponse(
   actionPackage: ActionPackage,
-  options: Pick<HttpEndpointOptions, "adapterDid" | "adapterSigningKey">,
+  options: Pick<HttpEndpointOptions, "adapterDid" | "adapterSigningKey" | "adapterSigner">,
 ): Promise<ActionResponse> {
   return actionResponse(options, {
     result: "indeterminate",
@@ -612,7 +619,7 @@ function unwrapActionPackage(body: unknown, adapterDid: Did): unknown {
 
 async function receiptFor(
   actionPackage: ActionPackage,
-  options: Pick<HttpEndpointOptions, "adapterDid" | "adapterSigningKey">,
+  options: Pick<HttpEndpointOptions, "adapterDid" | "adapterSigningKey" | "adapterSigner">,
   result: ReceiptResult,
 ) {
   return buildAndSignExecutionReceipt({
@@ -620,6 +627,7 @@ async function receiptFor(
     executionPayload: actionPackage.executionPayload,
     result: { result },
     verifierDid: options.adapterDid,
+    signer: options.adapterSigner,
     signingKey: options.adapterSigningKey,
   });
 }

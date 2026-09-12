@@ -28,7 +28,7 @@ for them to confirm the daemon is running before attempting to connect.
 
 ## 2. Generate your signing key
 
-Generate your Ed25519 signing key in this account:
+Generate your signing key in this account (Ed25519 by default):
 
 ```sh
 export MPAS_HOME="$HOME/.mpas"
@@ -253,3 +253,13 @@ to the adapter.
 - [macOS demo setup guide](setup-macos.md) — full single-machine walkthrough
 - [maintainer setup guide](maintainer.md)
 - [Credential Adapter operator guide](credential-adapter.md)
+
+
+### Choosing P-256
+
+Add `--suite P-256` to the `key generate` command to create an ES256 identity.
+Keep the existing Ed25519 command for the default suite. Use a new key filename
+and explicitly register the resulting DID; key generation will not overwrite an
+existing identity. All verifiers must support both suites before the new DID is
+used. Your choice controls your own signing algorithm, not which other signers
+the service verifies. See [signature-suite setup](../README.md#building-and-selecting-signature-suites).

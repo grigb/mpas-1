@@ -302,7 +302,7 @@ The bridge config lives on the agent side and tells the MCP Bridge how to connec
 | `plugin`                 | Path to the plugin file (bridge uses it for application identity/profile)      |
 | `adapter.url`            | Where to submit action packages                                                |
 | `agent.did`              | Legacy informational field; bridge identity is always derived from `agent.keyFile` |
-| `agent.keyFile`          | Path to the bridge's single Ed25519 proposer key                               |
+| `agent.keyFile`          | Path to the bridge's single Ed25519 or P-256 proposer key                               |
 | `target.applicationDid`  | Which application DID to target                                                |
 | `coordination.url`       | The coordination service endpoint                                              |
 | `workflow.dbPath`        | SQLite path for the durable workflow store. Relative paths resolve against the config file's directory. Omit only for ephemeral use — without it, active Actions do not survive a bridge restart |
@@ -326,7 +326,7 @@ timeouts.
 
 ### Key Files
 
-Each participant has an Ed25519 signing key (`$MPAS_HOME/keys/*.json`):
+Each participant has an Ed25519 (default) or P-256 signing key (`$MPAS_HOME/keys/*.json`):
 
 | Field        | Purpose                                                        |
 | ------------ | -------------------------------------------------------------- |
@@ -424,3 +424,39 @@ See [guides/setup-macos.md](guides/setup-macos.md) for the full demo setup guide
 ## Testing
 
 See [tests/README.md](tests/README.md) for the full test guide, including focused test commands and the cross-repo E2E setup.
+
+
+## Building and selecting signature suites
+
+The demo installs the published `@oma3/mpas@0.1.0-alpha.13` package from the npm
+registry. Do not point it at a local `file:` SDK path or `node_modules` symlink
+when validating a release:
+
+```sh
+npm --prefix examples/demo ci
+npm --prefix examples/demo run build
+```
+
+Run those commands from the repository root. From `examples/demo`, generate an
+explicit P-256 identity with:
+
+```sh
+node dist/cli/index.js key generate proposer-p256 --suite P-256 --key-dir ./test-keys
+```
+
+Omitting `--suite` preserves Ed25519 generation. Unknown suite names fail;
+generation refuses to overwrite an existing key file. The configured key
+selects the algorithm for Approvals, receipts, and HTTP signatures. All verifiers
+continue to support both suites, even when their receipt signer uses only one.
+
+Use the new key file with the existing `agent.keyFile`, signer key, or adapter key
+settings. Register its DID in the relevant trust and signer-group configuration.
+A P-256 key has a different DID; an unavailable old key never triggers automatic
+replacement. Update services to SDK `0.1.0-alpha.13` or later before using P-256
+identities. That candidate version must be published before external generated
+bridges install it from the registry; repository builds need no publication.
+
+See [mixed-suite conformance](../../conformance/signature-suites/README.md) for
+fixture-backed workflow, replay, receipt, and generated-bridge tests. New HTTP
+senders include `alg`; absent HTTP `alg` means Ed25519 without adding bytes to
+the signature base. JWS requires protected `alg` and authorized `kid` in both suites.
