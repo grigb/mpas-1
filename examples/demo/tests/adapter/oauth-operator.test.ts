@@ -1,5 +1,5 @@
 import { mkdtemp, chmod, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -14,6 +14,7 @@ const applicationDid = "did:web:netlify.example";
 const resourceUrl = "https://mcp.netlify.com/mcp";
 const session = "netlify-production";
 const credentialHandle = "netlify-oauth-token";
+const testOwner = `local-os-user:${typeof process.getuid === "function" ? String(process.getuid()) : userInfo().username}`;
 
 async function writeDeployment(configDir: string, value: unknown, name = "app.json"): Promise<void> {
   await writeFile(join(configDir, name), `${JSON.stringify(value)}\n`);
@@ -49,6 +50,8 @@ function storedSession(overrides: Record<string, unknown> = {}) {
     state: "state",
     redirectUrl: "http://127.0.0.1:1/oauth/callback",
     tokens: { access_token: "tok", token_type: "Bearer" },
+    owner: testOwner,
+    sharing: { applicationDids: [applicationDid], operatorPrincipals: [testOwner] },
     ...overrides,
   };
 }

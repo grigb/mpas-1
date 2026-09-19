@@ -90,7 +90,7 @@ createInterface({input:process.stdin}).on("line", line => {
     const journalPath = join(workspace, "dispatch-ledger.jsonl");
     const events: string[] = [];
     if (mode === "interrupted") {
-      const previous = new DispatchLedger(new FileDispatchJournal(journalPath));
+      const previous = new DispatchLedger(new FileDispatchJournal(journalPath), () => FIXTURE_NOW);
       previous.authorizeDispatch(actionPackage.actionEnvelope.actionId,
         computeJsonHash(actionPackage.actionEnvelope), actionPackage.actionEnvelope.expiresAt);
       previous.close();

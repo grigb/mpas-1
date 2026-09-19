@@ -128,11 +128,14 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<StartedD
     throw new Error(loaded.error.message);
   }
 
-  const adapterKey = await loadAdapterKey(options.adapterKeyPath ?? defaultAdapterKeyPath());
-  const ledger = new DispatchLedger(new FileDispatchJournal(options.journalPath ?? defaultJournalPath()));
+  const ledger = new DispatchLedger(
+    new FileDispatchJournal(options.journalPath ?? defaultJournalPath()),
+    options.now !== undefined ? () => options.now! : undefined,
+  );
   let appToClose: FastifyInstance | undefined;
   let verifierRelayWorker: VerifierRelayWorker | undefined;
   try {
+    const adapterKey = await loadAdapterKey(options.adapterKeyPath ?? defaultAdapterKeyPath());
     // Host startup occurs after the previous daemon's workers have stopped.
     // Merely opening a second store connection never performs this transition.
     ledger.recoverExecuting();
