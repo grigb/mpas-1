@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -34,7 +35,7 @@ const relayUrl = "https://relay.example";
 
 describe("Credential Adapter hosted-Verifier integration", () => {
   it.each(["executed", "interrupted"])("recovers exact %s responses across daemon restart without retransmission", async mode => {
-    const workspace = await mkdtemp(join(tmpdir(), "mpas-daemon-verifier-"));
+    const workspace = await mkdtemp(join(realpathSync(tmpdir()), "mpas-daemon-verifier-"));
     const configDir = join(workspace, "config");
     const credentialDir = join(workspace, "credentials");
     await mkdir(configDir, { recursive: true });
@@ -164,7 +165,7 @@ createInterface({input:process.stdin}).on("line", line => {
   });
 
   it.each(["invalid-record", "key-mismatch", "listen-failure"])("%s startup failure closes the actual database", async fault => {
-    const workspace = await mkdtemp(join(tmpdir(), "mpas-daemon-failed-start-"));
+    const workspace = await mkdtemp(join(realpathSync(tmpdir()), "mpas-daemon-failed-start-"));
     const journalPath = join(workspace, "dispatch-ledger.jsonl");
     const initial = new FileDispatchJournal(journalPath);
     if (fault === "invalid-record") initial.insertIfAbsent('{"value":"invalid"}', '{"version":"1","version":"2"}');

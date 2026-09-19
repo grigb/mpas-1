@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -127,7 +128,7 @@ async function verifyReceiptPayload(receipt: ExecutionReceipt): Promise<ReceiptP
 
 /** A real task-owned MCP process records initialization and tools/call separately. */
 async function countingTarget() {
-  const dir = await mkdtemp(join(tmpdir(), "mpas-ledger-target-"));
+  const dir = await mkdtemp(join(realpathSync(tmpdir()), "mpas-ledger-target-"));
   const eventsPath = join(dir, "events.jsonl"), server = join(dir, "server.mjs");
   await writeFile(server, `
 import { appendFileSync } from "node:fs";

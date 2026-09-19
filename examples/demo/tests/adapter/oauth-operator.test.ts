@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, chmod, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -34,7 +34,9 @@ async function writeSessionFile(
   handle: string,
   sessionValue: Record<string, unknown>,
 ): Promise<void> {
-  await writeFile(join(credentialDir, `${handle}.json`), `${JSON.stringify(sessionValue)}\n`);
+  const path = join(credentialDir, `${handle}.json`);
+  await writeFile(path, `${JSON.stringify(sessionValue)}\n`, { mode: 0o600 });
+  await chmod(path, 0o600);
 }
 
 function storedSession(overrides: Record<string, unknown> = {}) {
@@ -193,6 +195,8 @@ describe("OAuth operator callbacks", () => {
       const login = await startLogin(fixture);
       const redirect = await waitForAuthorizationUrl(login.authorizationUrl);
       const assertion = expect(login.loginPromise).rejects.toThrow(/OAuth authorization failed/);
+      const state = login.authorizationUrl()!.searchParams.get("state")!;
+      redirect.searchParams.set("state", state);
       redirect.searchParams.set("error", "access_denied");
       await fetch(redirect);
       await assertion;
@@ -201,12 +205,14 @@ describe("OAuth operator callbacks", () => {
     }
   });
 
-  it("rejects a callback that omits code and state", async () => {
+  it("rejects a callback that omits code", async () => {
     const fixture = await startOAuthProtectedMcpFixture();
     try {
       const login = await startLogin(fixture);
       const redirect = await waitForAuthorizationUrl(login.authorizationUrl);
-      const assertion = expect(login.loginPromise).rejects.toThrow(/missing code or state/);
+      const assertion = expect(login.loginPromise).rejects.toThrow(/missing.*authorization code/);
+      const state = login.authorizationUrl()!.searchParams.get("state")!;
+      redirect.searchParams.set("state", state);
       await fetch(redirect);
       await assertion;
     } finally {
