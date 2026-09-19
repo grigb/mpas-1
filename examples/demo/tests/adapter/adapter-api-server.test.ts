@@ -46,7 +46,7 @@ async function readJson<T>(path: string): Promise<T> {
 }
 
 async function credentialDir() {
-  const dir = await mkdtemp(join(tmpdir(), "mpas-http-credentials-"));
+  const dir = await mkdtemp(join(realpathSync(tmpdir()), "mpas-http-credentials-"));
   await mkdir(dir, { recursive: true });
   const path = join(dir, "github-mirror-token.json");
   await writeFile(path, `${JSON.stringify({ value: "ghp_test" })}\n`, { mode: 0o600 });
