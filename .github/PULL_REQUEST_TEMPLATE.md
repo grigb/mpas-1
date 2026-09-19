@@ -10,7 +10,18 @@
 
 ## Testing Performed
 
-<!-- What did you test? Manual steps, automated tests, etc. -->
+<!-- What did you test? Manual steps, automated tests, etc. Check the commands
+     you actually ran; delete the ones that do not apply. -->
+
+- [ ] `sdk/protocol`: `npm run build && npm run docs:check && npm test && npm run typecheck`
+- [ ] `bridge-generator`: `npm test && npm run build`
+- [ ] `examples/demo`: `npm test && npm run typecheck && npm run build && npm run test:e2e:mcp-bridge`
+- [ ] Docs updated where behavior or public API changed (`npm run docs:check` covers the SDK README)
+
+Conformance test tools are planned but not yet available (see `conformance/`); do not claim a
+conformance run in this template. No pull request runs publication or release commands
+(`npm publish`, `npm dist-tag`, version bumps): releasing is maintainer-only per
+`sdk/protocol/RELEASING.md`.
 
 ## CI Status
 

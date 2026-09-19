@@ -4,9 +4,10 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { it, expect } from "vitest";
-import { runGenerate } from "../src/generate.js";
+import { loadMpasSdkVersion, runGenerate } from "../src/generate.js";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
+const mpasVersion = await loadMpasSdkVersion();
 
 it("builds a generated bridge against the candidate SDK and signs P-256 Action and relay requests", async () => {
   const outDir = await mkdtemp(join(tmpdir(), "mpas-generated-es256-"));
@@ -21,7 +22,7 @@ it("builds a generated bridge against the candidate SDK and signs P-256 Action a
     }, null, 2), "utf8");
     await runGenerate({
       appName: "suite-probe", outDir, upstreamCommand: "fixture", upstreamArgs: [],
-      applicationDid: "did:web:suite-probe.example", log: () => {},
+      applicationDid: "did:web:suite-probe.example", mpasVersion, log: () => {},
       discover: async () => ({ command: "fixture", args: [], serverName: "fixture", protocolVersion: "2024-11-05", tools: [{ name: "echo", inputSchema: { type: "object" } }] }),
     });
     const bridge = join(outDir, "suite-probe/bridge");

@@ -13,6 +13,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { canonicalize } from "json-canonicalize";
 import { CID } from "multiformats/cid";
 import { sha256 } from "multiformats/hashes/sha2";
@@ -66,6 +67,12 @@ export interface GenerateOptions {
   upstreamArgs: string[];
   /** Injectable for deterministic tests. */
   capturedAt?: string;
+  /**
+   * Version of the `@oma3/mpas` dependency written into the generated bridge
+   * package.json. Required; obtain it from `loadMpasSdkVersion()` — the SDK
+   * manifest is the sole literal version source in this repository.
+   */
+  mpasVersion: string;
   /** Injectable for tests; defaults to real discovery. */
   discover?: (command: string, args: string[]) => Promise<UpstreamInfo>;
   log?: (message: string) => void;
@@ -76,6 +83,45 @@ export class GenerateError extends Error {
 }
 
 const APP_NAME_PATTERN = /^[a-z][a-z0-9-]*$/;
+
+/**
+ * The one manifest-loading boundary for the generated bridge's `@oma3/mpas`
+ * dependency version (sdk/protocol/package.json is the sole literal source).
+ * Reads the repository SDK manifest — from both `src/` and compiled `dist/`
+ * the default URL resolves to the same file — verifies the package name, and
+ * returns a validated nonempty version string. A missing, malformed,
+ * wrong-name, or versionless manifest fails closed; there is no fallback
+ * literal, environment default, network lookup, or test-only version source.
+ * Tests may pass a URL to a disposable manifest copy; callers never do.
+ */
+export async function loadMpasSdkVersion(
+  manifestUrl: URL = new URL("../../sdk/protocol/package.json", import.meta.url),
+): Promise<string> {
+  const manifestPath = fileURLToPath(manifestUrl);
+  let raw: string;
+  try {
+    raw = await readFile(manifestUrl, "utf8");
+  } catch (error) {
+    throw new GenerateError(
+      `Unable to read the SDK manifest ${manifestPath}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new GenerateError(
+      `SDK manifest ${manifestPath} is malformed JSON: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (!isPlainObject(parsed) || parsed.name !== "@oma3/mpas") {
+    throw new GenerateError(`SDK manifest ${manifestPath} must be the @oma3/mpas package manifest.`);
+  }
+  if (typeof parsed.version !== "string" || parsed.version.trim().length === 0) {
+    throw new GenerateError(`SDK manifest ${manifestPath} must declare a nonempty version string.`);
+  }
+  return parsed.version;
+}
 
 export async function runGenerate(options: GenerateOptions): Promise<void> {
   const log = options.log ?? ((message: string) => process.stderr.write(`${message}\n`));
@@ -90,6 +136,9 @@ export async function runGenerate(options: GenerateOptions): Promise<void> {
   const appDir = resolve(options.outDir, options.appName);
   const disclosurePath = options.resultDisclosurePath ?? join(appDir, "result-disclosure.json");
   const disclosure = await loadResultDisclosurePolicy(disclosurePath, upstream.tools.map((tool) => tool.name));
+  if (typeof options.mpasVersion !== "string" || options.mpasVersion.trim().length === 0) {
+    throw new GenerateError("GenerateOptions.mpasVersion must be a nonempty string produced by loadMpasSdkVersion().");
+  }
   await mkdir(join(appDir, "build-artifacts"), { recursive: true });
   await mkdir(join(appDir, "bridge", "src"), { recursive: true });
 
@@ -183,9 +232,9 @@ export async function runGenerate(options: GenerateOptions): Promise<void> {
   await writeGenerated("bridge/src/index.ts", generateBridge(upstream, disclosure.disclosureMap));
   await writeGenerated("bridge/src/tools.json", generateToolsJson(upstream.tools));
   await writeGenerated("bridge/src/sqlite-workflow-store.ts", generateWorkflowStore());
-  await writeGenerated("bridge/package.json", jsonFile(bridgePackageJson(options.appName)));
+  await writeGenerated("bridge/package.json", jsonFile(bridgePackageJson(options.appName, options.mpasVersion)));
   await writeGenerated("bridge/tsconfig.json", jsonFile(bridgeTsconfig()));
-  await writeGenerated("bridge/README.md", bridgeReadme(options.appName, upstream));
+  await writeGenerated("bridge/README.md", bridgeReadme(options.appName, upstream, options.mpasVersion));
 
   // --- CHANGELOG.md (create once, never overwrite) ---
   const changelogPath = join(appDir, "CHANGELOG.md");
@@ -578,7 +627,7 @@ async function mergedHarnessConfig(appDir: string, upstream: UpstreamInfo): Prom
   return mergeHarnessConfig(existing, upstream);
 }
 
-function bridgePackageJson(appName: string): object {
+function bridgePackageJson(appName: string, mpasVersion: string): object {
   return {
     name: `mpas-bridge-${appName}`,
     version: "0.1.0",
@@ -592,7 +641,7 @@ function bridgePackageJson(appName: string): object {
     },
     dependencies: {
       "@modelcontextprotocol/server": "2.0.0",
-      "@oma3/mpas": "0.1.0-alpha.13",
+      "@oma3/mpas": mpasVersion,
     },
     devDependencies: {
       "@types/node": "^22.15.29",
@@ -619,7 +668,7 @@ function bridgeTsconfig(): object {
   };
 }
 
-function bridgeReadme(appName: string, upstream: UpstreamInfo): string {
+function bridgeReadme(appName: string, upstream: UpstreamInfo, mpasVersion: string): string {
   const toolNames = upstream.tools.map((tool) => tool.name).join(", ");
   return `# mpas-bridge-${appName}
 
@@ -639,7 +688,7 @@ node dist/index.js --config <path-to-bridge-config.json>
 
 The bridge config format matches the MPAS demo proposer bridge (plugin path, direct Adapter URL or relay Action endpoint plus designated Verifier, agent key, independent Coordination Service URL, and workflow storage). The server auto-detects MCP 2026-07-28 Tasks clients and conventional MCP clients that need the MPAS wait-tool compatibility surface. All application tool calls are routed through MPAS: the bridge signs an initial Action Package and submits it through the configured Action endpoint; nothing is proxied directly to the upstream server. When additional approvals are required, the bridge retires that Action, constructs a replacement Action with a new Action ID and hash, explicitly creates its coordination workflow, and submits the completed replacement Action Package to the Action endpoint for the first time.
 
-The generated package requires SDK \`0.1.0-alpha.13\` or later for dual-suite signing and verification. Use an existing Ed25519 key or generate a new P-256 key with \`mpas key generate <name> --suite P-256\`. The key selects the suite; no algorithm dispatch is generated into the bridge. Register a new DID explicitly and upgrade verification services before using it. The SDK release must be published before installing generated packages from the registry.
+The generated package requires SDK \`${mpasVersion}\` or later for dual-suite signing and verification. Use an existing Ed25519 key or generate a new P-256 key with \`mpas key generate <name> --suite P-256\`. The key selects the suite; no algorithm dispatch is generated into the bridge. Register a new DID explicitly and upgrade verification services before using it. The SDK release must be published before installing generated packages from the registry.
 
 One bridge serves exactly one MCP client or agent identity and holds one private key for one proposer DID. Do not share a bridge process or key across independent clients; deploy a separate bridge instance and key for each agent.
 

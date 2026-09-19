@@ -119,9 +119,9 @@ runtime and `tools.json` together.
    unknown, duplicate, or invalid entries stop generation before the output
    tree changes.
 2. **`plugin.json`** — this is the file you edit.
-   - **Membership:** delete any operation that should route as pass-through instead of being governed. Regeneration remembers your removals (see below) and won't re-add them.
+   - **Membership:** delete any operation that should not be governed. A deleted operation is denied by default; it executes only where the deployment explicitly allows pass-through. Regeneration remembers your removals (see below) and won't re-add them.
    - **Impacts:** each operation's `impact` starts from upstream MCP metadata when available (`annotations.destructiveHint: true` → critical), then falls back to a name-based heuristic (`delete|remove|destroy|drop|purge` → critical, `merge|deploy|release|transfer|revoke` → high, everything else medium). Annotations are untrusted hints, so generated classifications remain drafts and `destructiveHint: false` never downgrades a name-based warning. Fix wrong values; your edits survive regeneration. Consult `build-artifacts/classification.json` for the rationale per tool.
-   - **Identity:** replace the `did:web:PLACEHOLDER` values (pluginDid, publisherDid, applicationDid) with real DIDs, and fill `credentialRequirements`. These also survive regeneration.
+   - **Identity:** replace the `did:web:PLACEHOLDER` values (pluginDid, publisherDid, applicationDid) with real DIDs, and review `credentialRequirements`. Each entry declares a credential `type`; `expectedAuthority` is the optional authority-review list (review-only evidence for who should hold authority over the credential — it is not a wire scope), `refreshScope` is the optional separate provider refresh-token scope, and `description` is free text. Legacy keys (`requiredCapabilities`, `authorityHint`, `scopes`) are rejected and stop regeneration. Provider wire scopes belong only in the trusted deployment config's `executionTarget.auth.scopes`, never in the plugin. These edits also survive regeneration.
 3. **`registry-entry.json`** — replace PLACEHOLDERs (or use `--org-config`), set `plugin.repository` to where the plugin will actually be published, then submit as a PR to `oma3/mpas/application-registry/{application}-{org}.json`. The entry already pins `plugin.artifactDid` and `upstream.toolSurface` for you.
 4. **`harness-config.json`** — if you intentionally rename tools, wrap schemas, or edit descriptions in the bridge, record it under `intentionalDeviations` so the compat harness allowlists it. Every tool you reference must exist in the snapshot.
 5. Log your decisions in `CHANGELOG.md`.
@@ -131,13 +131,14 @@ runtime and `tools.json` together.
 The Credential Adapter treats an operation as governed when it appears in
 `plugin.json` or has an explicit entry in the deployment policy. Governed
 operations receive policy evaluation; operations declared in the plugin also
-receive plugin schema validation. An operation absent from both is
-pass-through: with the default `passThrough: "allow"`, the adapter still
-verifies proposer authorization, signatures, target binding, freshness, and
-replay protection, but skips plugin schema validation and additional approval
-policy before executing with the adapter's credential. A deployment can
-instead set `passThrough: "deny"` to reject ungoverned operations. Removing an
-operation from the plugin does not remove it from the bridge's MCP tool list.
+receive plugin schema validation. An operation absent from both is ungoverned:
+the adapter **denies it by default** (omitted `passThrough` or `"deny"`), before
+credential access or target preparation. A deployment may explicitly set
+`passThrough: "allow"` to opt in: the adapter still verifies proposer
+authorization, signatures, target binding, freshness, and replay protection,
+but skips plugin schema validation and additional approval policy before
+executing with the adapter's credential. Removing an operation from the plugin
+does not remove it from the bridge's MCP tool list.
 
 You can give the following prompt to a coding agent from the generated
 application directory:
@@ -153,12 +154,12 @@ Read:
 
 The plugin should contain only operations that need MPAS governance. An
 operation is governed if it appears in plugin.json or has an explicit policy
-entry. Operations absent from both use the Credential Adapter's passThrough
-setting, which defaults to "allow". Pass-through operations remain visible in
-the bridge's MCP tool list and still undergo proposer authorization, signature,
-target, freshness, and replay checks, but they skip plugin schema validation
-and additional approval policy. A deployment with passThrough: "deny" rejects
-them instead.
+entry. Operations absent from both are denied by default: the Credential
+Adapter rejects ungoverned operations unless the deployment explicitly sets
+passThrough: "allow". Explicitly allowed pass-through operations remain
+visible in the bridge's MCP tool list and still undergo proposer
+authorization, signature, target, freshness, and replay checks, but they skip
+plugin schema validation and additional approval policy.
 
 Treat classification.json, impact values, names, and MCP annotations such as
 destructiveHint as advisory evidence, not automatic decisions. Consider side

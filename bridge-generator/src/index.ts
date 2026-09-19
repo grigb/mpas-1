@@ -4,7 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { generateBridge, generateToolsJson } from "./bridge-codegen.js";
 import { discoverUpstream } from "./discovery.js";
-import { runGenerate } from "./generate.js";
+import { loadMpasSdkVersion, runGenerate } from "./generate.js";
 import { generatePlugin } from "./plugin-codegen.js";
 import { applyPromptSecrets } from "./prompt-secret.js";
 import { loadResultDisclosurePolicy } from "./result-disclosure.js";
@@ -33,7 +33,10 @@ export async function run(argv = process.argv.slice(2)): Promise<void> {
   if (argv[0] === "generate") {
     const args = parseGenerateArgs(argv.slice(1));
     await applyPromptSecrets(args.promptSecrets);
-    await runGenerate(args);
+    // The SDK manifest is read once here, before any output is generated; a
+    // missing, malformed, wrong-name, or versionless manifest fails the run.
+    const mpasVersion = await loadMpasSdkVersion();
+    await runGenerate({ ...args, mpasVersion });
     return;
   }
 

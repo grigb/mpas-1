@@ -54,8 +54,14 @@ Publish the prerelease:
 
 ```sh
 npm publish --access public --tag alpha
-npm dist-tag add @oma3/mpas@0.1.0-alpha.N latest
 ```
+
+**Dist-tag rule:** a prerelease is always published with its prerelease channel
+tag (`alpha` for `0.1.0-alpha.N`) and is never given the `latest` dist-tag —
+not at publish time and not by a later `npm dist-tag add`. Only stable releases
+(for example `1.0.0`) use `latest`. Before any real publish you can confirm the
+tag a command would select with `npm publish --dry-run --tag <tag>`, which
+publishes nothing.
 
 Confirm the published version and dist-tags:
 
@@ -63,5 +69,8 @@ Confirm the published version and dist-tags:
 npm view @oma3/mpas@alpha version
 npm dist-tag ls @oma3/mpas
 ```
+
+The alpha version must appear only under the `alpha` dist-tag; `latest` must
+never name a prerelease.
 
 Stable releases use the `latest` dist-tag instead of `alpha`.

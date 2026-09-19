@@ -1,11 +1,15 @@
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
-import { GenerateError, checkRegistryEntryV1, runGenerate, validateRegistryEntry, type GenerateOptions } from "../src/generate.js";
+import { GenerateError, checkRegistryEntryV1, loadMpasSdkVersion, runGenerate, validateRegistryEntry, type GenerateOptions } from "../src/generate.js";
 
 const mockServer = fileURLToPath(new URL("./fixtures/mock-mcp-server.mjs", import.meta.url));
+
+// The expected SDK dependency version is loaded through the same single
+// manifest boundary the generator uses — never repeated as a literal.
+const mpasVersion = await loadMpasSdkVersion();
 
 async function generate(overrides: Partial<GenerateOptions> = {}): Promise<string> {
   const outDir = overrides.outDir ?? (await mkdtemp(join(tmpdir(), "bridge-gen-")));
@@ -22,6 +26,7 @@ async function generate(overrides: Partial<GenerateOptions> = {}): Promise<strin
     upstreamArgs: [mockServer],
     capturedAt: "2026-07-18T00:00:00.000Z",
     log: () => {},
+    mpasVersion,
     ...overrides,
     ...(upstream ? { discover: async () => upstream } : {}),
     resultDisclosurePath: overrides.resultDisclosurePath ?? policyPath,
@@ -81,7 +86,7 @@ describe("runGenerate", () => {
     });
     expect(bridgePackage.license).toBe("Apache-2.0");
     expect(bridgePackage.scripts.build).toContain("copyFileSync('src/tools.json', 'dist/tools.json')");
-    expect(bridgePackage.dependencies["@oma3/mpas"]).toBe("0.1.0-alpha.13");
+    expect(bridgePackage.dependencies["@oma3/mpas"]).toBe(mpasVersion);
     expect(bridgePackage.dependencies["@modelcontextprotocol/server"]).toBe("2.0.0");
     expect(bridgePackage.dependencies["@modelcontextprotocol/sdk"]).toBeUndefined();
   });
@@ -282,6 +287,62 @@ describe("runGenerate", () => {
     const appDir = await generate();
     await writeFile(join(appDir, "plugin.json"), "{ not-json");
     await expect(generate({ outDir: join(appDir, "..") })).rejects.toThrow(/Unable to parse existing/);
+  });
+});
+
+describe("one SDK version source (N43)", () => {
+  async function writeManifest(contents: string): Promise<URL> {
+    const dir = await mkdtemp(join(tmpdir(), "bridge-gen-manifest-"));
+    const path = join(dir, "package.json");
+    await writeFile(path, contents);
+    return pathToFileURL(path);
+  }
+
+  it("loads the repository SDK manifest version through the single boundary", async () => {
+    const version = await loadMpasSdkVersion();
+    expect(version).toBe(mpasVersion);
+    expect(typeof version).toBe("string");
+    expect(version.length).toBeGreaterThan(0);
+  });
+
+  it("changing only a temporary manifest copy changes the generated @oma3/mpas dependency", async () => {
+    const changedVersion = "0.0.0-n43-control.1";
+    const manifestUrl = await writeManifest(`${JSON.stringify({ name: "@oma3/mpas", version: changedVersion })}\n`);
+    const changed = await loadMpasSdkVersion(manifestUrl);
+    expect(changed).toBe(changedVersion);
+
+    const appDir = await generate({ mpasVersion: changed });
+    const bridgePackage = await readJson<{ dependencies: Record<string, string> }>(
+      join(appDir, "bridge", "package.json"),
+    );
+    expect(bridgePackage.dependencies["@oma3/mpas"]).toBe(changedVersion);
+  });
+
+  it.each([
+    ["missing", async () => pathToFileURL(join(await mkdtemp(join(tmpdir(), "bridge-gen-manifest-")), "absent.json"))],
+    ["malformed", async () => writeManifest("{ not json\n")],
+    ["wrong-name", async () => writeManifest(`${JSON.stringify({ name: "@example/not-mpas", version: "1.2.3" })}\n`)],
+    ["absent-version", async () => writeManifest(`${JSON.stringify({ name: "@oma3/mpas" })}\n`)],
+    ["empty-version", async () => writeManifest(`${JSON.stringify({ name: "@oma3/mpas", version: "  " })}\n`)],
+  ])("fails closed on a %s manifest", async (_label, makeUrl) => {
+    await expect(loadMpasSdkVersion(await makeUrl())).rejects.toBeInstanceOf(GenerateError);
+  });
+
+  it("rejects an empty mpasVersion before any output is generated", async () => {
+    const outDir = await mkdtemp(join(tmpdir(), "bridge-gen-versionless-"));
+    await expect(generate({ outDir, mpasVersion: "" })).rejects.toBeInstanceOf(GenerateError);
+    await expect(readFile(join(outDir, "mockapp", "bridge", "package.json"), "utf8")).rejects.toThrow();
+  });
+
+  it("leaves no SDK version literal in generator source or tests", async () => {
+    const packageRoot = fileURLToPath(new URL("..", import.meta.url));
+    const alphaLiteral = /\d+\.\d+\.\d+-alpha\.\d+/;
+    for (const subtree of ["src", "tests"]) {
+      for (const [file, contents] of Object.entries(await readAllFiles(join(packageRoot, subtree)))) {
+        expect(contents.includes(mpasVersion), `${subtree}/${file} repeats the SDK version`).toBe(false);
+        expect(alphaLiteral.test(contents), `${subtree}/${file} contains an SDK alpha version literal`).toBe(false);
+      }
+    }
   });
 });
 

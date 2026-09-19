@@ -74,7 +74,7 @@ For a higher-level overview of the problem space and approach, see
 
 ### The Governance Boundary
 
-The Application Plugin plus the deployment policy define the **governed set** of operations. An operation in that set gets schema validation and policy evaluation (thresholds, signer groups, `defaultRequirement`). An operation outside that set is routed as **pass-through**: after proposer gating and signature verification it executes with the adapter's credential on the proposer's signature alone — `defaultRequirement` does not apply to it. This reflects the plugin-anchored trust model: the plugin publisher — typically the party that knows the target API best, attested via OMATrust, decides which operations need governance. Operators ratify that decision by trusting the publisher. If you care about an operation, put it in the policy entry; power users who want unlisted operations refused entirely can set `passThrough: "deny"` in the deployment config.
+The Application Plugin plus the deployment policy define the **governed set** of operations. An operation in that set gets schema validation and policy evaluation (thresholds, signer groups, `defaultRequirement`). An operation outside that set is **denied by default** — the reference adapter refuses it before credential access or target preparation. A deployment may explicitly set `passThrough: "allow"` to execute such operations with the adapter's credential after proposer gating and signature verification; that opt-in skips schema validation and policy evaluation, including `defaultRequirement`, so new or unreviewed operations can gain credential access without independent approval. This reflects the plugin-anchored trust model: the plugin publisher — typically the party that knows the target API best, attested via OMATrust, decides which operations need governance. Operators ratify that decision by trusting the publisher. If you care about an operation, put it in the plugin or the policy rather than opting into pass-through.
 
 ## What This Repository Contains
 
@@ -111,6 +111,7 @@ dependencies, build each package, and run the test suites in dependency order:
 ```sh
 npm ci --prefix sdk/protocol
 npm run build --prefix sdk/protocol
+npm run docs:check --prefix sdk/protocol
 npm test --prefix sdk/protocol
 
 npm ci --prefix bridge-generator
@@ -122,6 +123,13 @@ npm run build --prefix examples/demo
 npm test --prefix examples/demo
 npm run test:e2e:mcp-bridge --prefix examples/demo
 ```
+
+The `docs:check` command verifies that the SDK README's public-export inventory is complete
+and that every TypeScript example in it compiles against the built package. Conformance test
+tools are planned but not yet available (see `conformance/`); do not represent anything above
+as a conformance run. None of these commands publishes or releases anything; releasing is a
+maintainer-only process documented in
+[`sdk/protocol/RELEASING.md`](sdk/protocol/RELEASING.md).
 
 For the complete local governed-action walkthrough, including proposer,
 maintainer, Credential Adapter, policy, and agent-harness configuration, follow
@@ -156,7 +164,15 @@ integrations/
   skills/                       Agent skill packages (proposer, maintainer)
 ```
 
-Each example in `examples/` is self-contained with its own build tooling. The demo depends on the published `@oma3/mpas@0.1.0-alpha.13` package.
+Each example in `examples/` is self-contained with its own build tooling. The demo declares the
+published SDK range (`"@oma3/mpas": "^0.1.0-alpha.10"` at the time of writing), so a stock
+`npm ci` builds and tests it against the published SDK. To exercise the repository SDK instead,
+build `sdk/protocol` first, then substitute it inside the demo's install — the documented
+mechanism is replacing `examples/demo/node_modules/@oma3/mpas` with a link to the checkout
+(`../../sdk/protocol`); `npm install /path/to/mpas/sdk/protocol` also works but rewrites the
+demo's manifest. Building the SDK alone does not change which SDK the demo resolves — verify
+the resolved entry (for example with `node -p "require.resolve('@oma3/mpas/package.json',
+{ paths: ['examples/demo'] })"`) before interpreting results.
 
 ## Documentation
 
