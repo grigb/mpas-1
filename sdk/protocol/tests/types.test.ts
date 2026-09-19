@@ -1,5 +1,30 @@
 import { describe, expect, it } from "vitest";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import ts from "typescript";
 import type { ActionPackage, AdapterResponse, McpToolDefinition, PolicyConfig } from "../src/index.js";
+
+function compileVirtualTypeProbe(source: string): readonly ts.Diagnostic[] {
+  const testDirectory = path.dirname(fileURLToPath(import.meta.url));
+  const virtualFile = path.join(testDirectory, "virtual-approval-requirements.mts");
+  const options: ts.CompilerOptions = {
+    noEmit: true,
+    strict: true,
+    skipLibCheck: true,
+    target: ts.ScriptTarget.ES2022,
+    module: ts.ModuleKind.NodeNext,
+    moduleResolution: ts.ModuleResolutionKind.NodeNext,
+  };
+  const host = ts.createCompilerHost(options);
+  const getSourceFile = host.getSourceFile.bind(host);
+  const fileExists = host.fileExists.bind(host);
+  host.fileExists = (fileName) => fileName === virtualFile || fileExists(fileName);
+  host.getSourceFile = (fileName, languageVersion, onError, shouldCreateNewSourceFile) =>
+    fileName === virtualFile
+      ? ts.createSourceFile(virtualFile, source, languageVersion, true)
+      : getSourceFile(fileName, languageVersion, onError, shouldCreateNewSourceFile);
+  return ts.getPreEmitDiagnostics(ts.createProgram([virtualFile], options, host));
+}
 
 describe("MPAS Bridge types", () => {
   it("allows a fully typed sample Action Package", () => {
@@ -137,7 +162,19 @@ describe("MPAS Bridge types", () => {
 
   it("models requirement and reject policy entries", () => {
     const policy: PolicyConfig = {
-      defaultRequirement: { type: "proposerOnly" },
+      version: "1",
+      type: "MpasApplicationPolicy",
+      policyProfileUrl: "https://github.com/oma3dao/mpas/blob/main/specs/mpas-profile-policy-json.md",
+      applicationDid: "did:web:github.example",
+      executionProfile: { id: "did:web:profiles.oma3.org:mcp", format: "mcp.toolsCall" },
+      defaultRequirement: {
+        type: "anyOf",
+        requirements: [{ type: "allOf", requirements: [{ type: "proposerOnly" }] }],
+      },
+      signerGroups: {
+        all: ["did:web:agents.example:proposer"],
+        proposers: ["did:web:agents.example:proposer"],
+      },
       policies: {
         create_issue: [
           { reject: false, requirements: { type: "proposerOnly" } },
@@ -147,5 +184,27 @@ describe("MPAS Bridge types", () => {
     };
 
     expect(policy.policies?.create_issue[1].reject).toBe(true);
+  });
+
+  it("compiles valid flat and recursive decisions while rejecting an ordinary nested reject leaf", () => {
+    const valid = compileVirtualTypeProbe(`
+      import type { Approval, ApprovalRequirements, Decision } from "../src/index.js";
+      const approve: ApprovalRequirements = { anyOf: [{ type: "threshold", threshold: 1, eligibleSigners: ["did:web:agents.example:approve"], decision: "approve" }] };
+      const propose: ApprovalRequirements = { allOf: [{ type: "threshold", threshold: 1, eligibleSigners: ["did:web:agents.example:propose"], decision: "propose" }] };
+      const abstain: ApprovalRequirements = { anyOf: [{ type: "anyOf", requirements: [{ type: "allOf", requirements: [{ type: "threshold", threshold: 1, eligibleSigners: ["did:web:agents.example:abstain"], decision: "abstain" }] }] }] };
+      const override: ApprovalRequirements = { overrideSigners: [{ signer: "did:web:agents.example:override", permissions: ["execute"] }] };
+      const approvalDecision: Approval["decision"] = "reject";
+      const coreDecision: Decision = "reject";
+      export { approve, propose, abstain, override, approvalDecision, coreDecision };
+    `);
+    expect(valid.map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n"))).toEqual([]);
+
+    const invalid = compileVirtualTypeProbe(`
+      import type { ApprovalRequirements } from "../src/index.js";
+      export const rejected: ApprovalRequirements = { anyOf: [{ type: "anyOf", requirements: [{ type: "threshold", threshold: 1, eligibleSigners: ["did:web:agents.example:reject"], decision: "reject" }] }] };
+    `);
+    expect(invalid.length).toBeGreaterThan(0);
+    expect(invalid.map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n")).join("\n"))
+      .toContain('Type \'"reject"\' is not assignable');
   });
 });

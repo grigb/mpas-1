@@ -14,17 +14,7 @@ interface KeyFixture {
 }
 
 interface DeploymentConfig {
-  policy: {
-    version: "1";
-    type: "MpasApplicationPolicy";
-    defaultRequirement: PolicyConfig["defaultRequirement"];
-    signerGroups: Record<string, Did[]>;
-    policies?: Record<string, Array<{
-      description?: string;
-      match?: { conditions?: Array<{ source: string; path: string; op: string; value?: unknown }> };
-      requirements: PolicyConfig["defaultRequirement"];
-    }>>;
-  };
+  policy: PolicyConfig;
   signerKeys: Array<{ did: Did; label?: string; publicJwk: unknown }>;
 }
 
@@ -67,12 +57,7 @@ async function verifiedFixture(file: string) {
 
 async function policyFromConfig(file: string): Promise<PolicyConfig> {
   const config = await readJson<DeploymentConfig>(join(fixturesDir, "configs", file));
-
-  return {
-    defaultRequirement: config.policy.defaultRequirement,
-    policies: config.policy.policies as PolicyConfig["policies"],
-    signerGroups: config.policy.signerGroups,
-  };
+  return config.policy;
 }
 
 describe("evaluatePolicy", () => {
@@ -90,14 +75,12 @@ describe("evaluatePolicy", () => {
 
     expect(result).toMatchObject({
       status: "additionalApprovalsRequired",
-      unsatisfiedRules: [
-        {
-          requiredRole: "maintainers",
-          requiredDecision: "approve",
-          threshold: 2,
-          found: 0,
-        },
-      ],
+      unsatisfiedRequirement: {
+        type: "threshold",
+        threshold: 2,
+        decision: "approve",
+        eligibleSigners: expect.any(Array),
+      },
     });
   });
 
@@ -137,14 +120,12 @@ describe("evaluatePolicy", () => {
     // The self-approval should not satisfy the threshold — still requires additional approvals
     expect(result).toMatchObject({
       status: "additionalApprovalsRequired",
-      unsatisfiedRules: [
-        {
-          requiredRole: "maintainers",
-          requiredDecision: "approve",
-          threshold: 2,
-          found: 0,
-        },
-      ],
+      unsatisfiedRequirement: {
+        type: "threshold",
+        threshold: 2,
+        decision: "approve",
+        eligibleSigners: expect.any(Array),
+      },
     });
   });
 });

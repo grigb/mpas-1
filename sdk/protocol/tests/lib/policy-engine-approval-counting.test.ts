@@ -14,6 +14,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { KeyManager, computeHash } from "../../src/index.js";
 import type { ActionEnvelope, ActionPackage, Approval, Did } from "../../src/types/mpas.js";
 import { evaluatePolicy, type PolicyConfig } from "../../src/lib/policy-engine.js";
+import { MPAS_POLICY_PROFILE_URL } from "../../src/lib/policy-config.js";
 import {
   verifyApprovalBundle,
   type TrustedSigner,
@@ -105,8 +106,13 @@ async function verified(approvals: Approval[]): Promise<VerifiedApprovals> {
 
 function policyFor(threshold: number, maintainers: Did[]): PolicyConfig {
   return {
+    version: "1",
+    type: "MpasApplicationPolicy",
+    policyProfileUrl: MPAS_POLICY_PROFILE_URL,
+    applicationDid: mergePackage.actionEnvelope.target.applicationDid,
+    executionProfile: { ...mergePackage.actionEnvelope.executionProfile },
     defaultRequirement: { type: "proposerOnly" },
-    signerGroups: { all: [proposerDid, maintainerA, maintainerB, stranger], maintainers },
+    signerGroups: { all: [proposerDid, maintainerA, maintainerB, stranger], proposers: [proposerDid], maintainers },
     policies: {
       merge_pull_request: [
         {
@@ -178,10 +184,15 @@ describe("§6.5 rule 4 — duplicate Approvals from the same Signer MUST NOT be 
       await approvalAt(maintainerAKeys, mergePackage.actionEnvelope, "approve", "2026-06-05T18:02:00.000Z"),
     ]);
 
-    const result = evaluatePolicy(mergePackage, approvals, policyFor(3, [maintainerA, maintainerB]));
+    const result = evaluatePolicy(mergePackage, approvals, policyFor(2, [maintainerA, maintainerB]));
     expect(result.status).toBe("additionalApprovalsRequired");
     if (result.status !== "additionalApprovalsRequired") return;
-    expect(result.unsatisfiedRules[0].found).toBe(1);
+    expect(result.unsatisfiedRequirement).toEqual({
+      type: "threshold",
+      threshold: 1,
+      eligibleSigners: [maintainerB],
+      decision: "approve",
+    });
   });
 });
 
@@ -214,9 +225,10 @@ describe("§6.5 rule 2 — only Approvals with the required decision may be coun
       await approvalAt(maintainerBKeys, mergePackage.actionEnvelope, "reject", "2026-06-05T18:02:00.000Z"),
     ]);
 
-    expect(evaluatePolicy(mergePackage, approvals, policyFor(2, [maintainerA, maintainerB])).status).toBe(
-      "additionalApprovalsRequired",
-    );
+    expect(evaluatePolicy(mergePackage, approvals, policyFor(2, [maintainerA, maintainerB]))).toMatchObject({
+      status: "rejected",
+      code: "POLICY_REQUIREMENT_UNREACHABLE",
+    });
   });
 });
 
@@ -240,8 +252,9 @@ describe("§6.5 rule 5 — an Approval from the Proposer MUST NOT count toward a
       await approvalAt(proposerKeys, mergePackage.actionEnvelope, "approve", "2026-06-05T18:02:00.000Z"),
     ]);
 
-    expect(evaluatePolicy(mergePackage, approvals, policyFor(2, [proposerDid, maintainerA])).status).toBe(
-      "additionalApprovalsRequired",
-    );
+    expect(evaluatePolicy(mergePackage, approvals, policyFor(2, [proposerDid, maintainerA]))).toMatchObject({
+      status: "rejected",
+      code: "POLICY_REQUIREMENT_UNREACHABLE",
+    });
   });
 });

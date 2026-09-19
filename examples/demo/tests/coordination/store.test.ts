@@ -6,7 +6,15 @@ import { describe, expect, it, vi } from "vitest";
 import { buildDeliveryEnvelope, parseCoordinationPollResponse } from "@oma3/mpas";
 import { CoordinationStore, MpasServiceError } from "../../src/coordination/store.js";
 import type { CoordinationActionRequest } from "../../src/coordination/types.js";
-import type { ActionPackage, Approval, Decision, Did, Hash } from "../../src/core/types.js";
+import type {
+  ActionPackage,
+  Approval,
+  ApprovalRequirements,
+  Decision,
+  Did,
+  Hash,
+  ThresholdRequirement,
+} from "../../src/core/types.js";
 import { computeJsonHash } from "../../src/core/verification.js";
 
 interface FixtureKey {
@@ -19,6 +27,12 @@ interface FixtureKey {
 const FIXTURE_NOW = Date.parse("2026-06-05T19:00:00.000Z");
 
 const adapterDid = "did:web:adapter.local" as Did;
+
+function firstThreshold(requirements: ApprovalRequirements): ThresholdRequirement {
+  const requirement = requirements.anyOf?.[0];
+  if (!requirement || requirement.type !== "threshold") throw new Error("fixture must start with a threshold path");
+  return requirement;
+}
 
 describe("CoordinationStore", () => {
   it("stores pending actions and returns signer-specific approval requests", async () => {
@@ -201,14 +215,12 @@ describe("CoordinationStore", () => {
     const cases: CoordinationActionRequest[] = [];
 
     const unachievable = structuredClone(request);
-    unachievable.authorizationRequirements.approvalRequirements.anyOf![0].threshold = 3;
+    firstThreshold(unachievable.authorizationRequirements.approvalRequirements).threshold = 3;
     cases.push(unachievable);
 
     const duplicate = structuredClone(request);
-    duplicate.authorizationRequirements.approvalRequirements.anyOf![0].eligibleSigners = [
-      duplicate.authorizationRequirements.approvalRequirements.anyOf![0].eligibleSigners[0],
-      duplicate.authorizationRequirements.approvalRequirements.anyOf![0].eligibleSigners[0],
-    ];
+    const duplicateThreshold = firstThreshold(duplicate.authorizationRequirements.approvalRequirements);
+    duplicateThreshold.eligibleSigners = [duplicateThreshold.eligibleSigners[0], duplicateThreshold.eligibleSigners[0]];
     cases.push(duplicate);
 
     const wrongRequirementsHash = structuredClone(request);
@@ -257,8 +269,9 @@ describe("CoordinationStore", () => {
     const store = new CoordinationStore({ now: FIXTURE_NOW });
     const proposer = await fixtureKey("proposer");
 
-    request.authorizationRequirements.approvalRequirements.anyOf![0].threshold = 1;
-    request.authorizationRequirements.approvalRequirements.anyOf![0].eligibleSigners.push(proposer.did);
+    const proposerThreshold = firstThreshold(request.authorizationRequirements.approvalRequirements);
+    proposerThreshold.threshold = 1;
+    proposerThreshold.eligibleSigners.push(proposer.did);
     store.createWorkflow(request);
 
     const selfApproval = await signApproval(request.authorizationRequirements.actionEnvelopeHash, proposer, "approve");

@@ -225,12 +225,18 @@ describe("loadDeploymentConfigs", () => {
     const config = await readJson<Record<string, unknown>>(
       join(fixturesDir, "configs", "github-mirror-adapter-config.json"),
     );
-    const policy = config.policy as { signerGroups: Record<string, unknown> };
-    // A non-empty group is still impossible when it contains only the caller:
-    // MPAS never counts a proposer as an approver of its own Action.
-    policy.signerGroups.maintainers = [
-      (policy.signerGroups.proposers as string[])[0],
-    ];
+    const policy = config.policy as {
+      signerGroups: Record<string, string[]>;
+      defaultRequirement: Record<string, unknown>;
+    };
+    // This inline threshold is structurally achievable, but impossible for the
+    // one permitted proposer because MPAS excludes self-approval.
+    policy.defaultRequirement = {
+      type: "threshold",
+      threshold: 1,
+      eligibleSigners: [policy.signerGroups.proposers[0]],
+      decision: "approve",
+    };
     await writeJson(join(configDir, "github-mirror.json"), config);
 
     const result = await loadDeploymentConfigs(configDir, { confirmPluginUse: approvePluginUse });

@@ -5,12 +5,16 @@
 export {
   evaluatePolicy,
   checkProposerAuthorization,
+  loadPolicyConfig,
+  MPAS_POLICY_PROFILE_URL,
   validatePolicyConfig,
 } from "@oma3/mpas/policy-engine";
 
 export type {
   ProposerGateResult,
   PolicyConfig,
+  MpasApplicationPolicy,
+  PolicyConfigLoadResult,
   PolicyEntry,
   RequirementPolicyEntry,
   RejectPolicyEntry,
@@ -19,10 +23,10 @@ export type {
   ConditionOp,
   PolicyResult,
   PolicyConfigValidationResult,
-  UnsatisfiedThreshold,
   Requirement,
   ProposerOnlyRequirement,
   ThresholdRequirement,
+  PolicyThresholdRequirement,
   AllOfRequirement,
   AnyOfRequirement,
 } from "@oma3/mpas/policy-engine";

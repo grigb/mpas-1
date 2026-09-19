@@ -217,10 +217,12 @@ The server MUST apply this procedure before presenting review material and MUST 
 7. When `authorizationRequirements.expiresAt` is present, compare trusted current time to it. If the requirements are expired or the timestamp is invalid, use `ACTION_EXPIRED`.
 8. Determine the requested decision. For review, use `ApprovalRequest.requestedDecision`, which MUST be `approve` or `reject`. For signing, use the tool's decision and require it to equal `requestedDecision` when that field is present.
 9. Confirm that the configured Signer DID is eligible for that decision through at least one threshold or override path:
-   - a threshold path in `approvalRequirements.anyOf` or `approvalRequirements.allOf` matches when `eligibleSigners` contains the exact Signer DID and the path's `decision` equals the requested decision, with an absent `decision` defaulting to `approve` as required by Core; or
+   - recursively traverse every threshold leaf in `approvalRequirements.anyOf` and `approvalRequirements.allOf`, including leaves inside `allOf` and `anyOf` groups. A threshold leaf matches when `eligibleSigners` contains the exact Signer DID and the leaf's `decision` equals the requested decision, with an absent `decision` defaulting to `approve` as required by Core; or
    - an `overrideSigners` entry matches when `signer` equals the exact Signer DID and `permissions` contains the requested decision.
 
 If eligibility cannot be established, use `SIGNER_NOT_ELIGIBLE`. Signer eligibility is a pre-signing safety check, not final authorization. The Verifier still applies authoritative policy to the completed Action Package.
+
+This profile defines exactly the four tools listed in Section 4. Policy-generated `propose` and `abstain` threshold leaves can be carried by Core and Coordination, but this profile does not define tools that create those decisions. The server MUST NOT present or sign such a leaf through `mpas_approve` or `mpas_reject`; a requested-decision mismatch uses the existing Section 9 error mapping.
 
 ## 10. Stable Error Mapping
 

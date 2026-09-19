@@ -5,6 +5,7 @@ import Fastify, {
   type RouteHandlerMethod,
 } from "fastify";
 import {
+  approvalRequirementThresholds,
   InMemoryNonceStore,
   isValidMpasAudienceOrigin,
   MPAS_MAX_SIGNATURE_LIFETIME_SECONDS,
@@ -560,8 +561,7 @@ function coordinationRecipients(body: CoordinationActionRequest): Did[] {
   const requirements = body.authorizationRequirements.approvalRequirements;
   return [...new Set<Did>([
     body.actionPackage.actionEnvelope.proposer.did,
-    ...(requirements.anyOf ?? []).flatMap((threshold) => threshold.eligibleSigners),
-    ...(requirements.allOf ?? []).flatMap((threshold) => threshold.eligibleSigners),
+    ...approvalRequirementThresholds(requirements).flatMap((threshold) => threshold.eligibleSigners),
     ...(requirements.overrideSigners ?? []).map((entry) => entry.signer),
   ])];
 }

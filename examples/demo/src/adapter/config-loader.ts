@@ -9,7 +9,11 @@ import { sha256 } from "multiformats/hashes/sha2";
 import { base32 } from "multiformats/bases/base32";
 import { loadPlugin, type MpasApplicationPlugin } from "../core/plugin-loader.js";
 import type { Did } from "../core/types.js";
-import { validatePolicyConfig, type PolicyConfig, type PolicyEntry, type Requirement } from "../core/policy-engine.js";
+import {
+  validatePolicyConfig,
+  type MpasApplicationPolicy,
+  type Requirement,
+} from "../core/policy-engine.js";
 import type { McpHttpTarget } from "./dispatch/mcp-http.js";
 import type { McpStdioTarget } from "./dispatch/mcp-stdio.js";
 import type {
@@ -32,21 +36,6 @@ export interface SignerKey {
   label?: string;
   /** Optional when `did` is a did:jwk — the DID embeds the key and is the source of truth. */
   publicJwk?: JWK;
-}
-
-export interface MpasApplicationPolicy {
-  version: "1";
-  type: "MpasApplicationPolicy";
-  policyProfileUrl: string;
-  applicationDid: Did;
-  executionProfile: {
-    id: Did;
-    format?: string;
-  };
-  defaultRequirement: PolicyConfig["defaultRequirement"];
-  signerGroups: Record<string, Did[]>;
-  policies?: Record<string, PolicyEntry[]>;
-  context?: unknown;
 }
 
 export interface DeploymentConfig {

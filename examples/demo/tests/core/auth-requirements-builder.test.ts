@@ -1,107 +1,46 @@
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { buildAuthorizationRequirements } from "../../src/core/auth-requirements-builder.js";
-import { evaluatePolicy, type PolicyConfig } from "../../src/core/policy-engine.js";
-import { computeJsonHash, verifyActionPackage, type TrustedSigner } from "../../src/core/verification.js";
-import type { ActionPackage, Did } from "../../src/core/types.js";
+import type { ActionEnvelope, Did } from "../../src/core/types.js";
+import { computeJsonHash } from "../../src/core/verification.js";
 
-/** Deterministic clock pinned inside the fixture validity window. */
-const FIXTURE_NOW = Date.parse("2026-06-05T19:00:00.000Z");
-
-const fixturesDir = fileURLToPath(new URL("../fixtures/", import.meta.url));
-
-interface KeyFixture {
-  did: Did;
-  publicJwk: TrustedSigner["publicJwk"];
-}
-
-interface DeploymentConfig {
-  policy: {
-    defaultRequirement: PolicyConfig["defaultRequirement"];
-    signerGroups: Record<string, Did[]>;
-    policies?: Record<string, Array<{
-      description?: string;
-      match?: { conditions?: Array<{ source: string; path: string; op: string; value?: unknown }> };
-      requirements: PolicyConfig["defaultRequirement"];
-    }>>;
-  };
-  signerKeys: Array<{ did: Did; label?: string; publicJwk: unknown }>;
-}
-
-async function readJson<T>(path: string): Promise<T> {
-  return JSON.parse(await readFile(path, "utf8")) as T;
-}
-
-async function trustedSigners(): Promise<TrustedSigner[]> {
-  const proposer = await readJson<KeyFixture>(join(fixturesDir, "test-keys", "proposer.json"));
-  const maintainerA = await readJson<KeyFixture>(join(fixturesDir, "test-keys", "maintainer-a.json"));
-  const maintainerB = await readJson<KeyFixture>(join(fixturesDir, "test-keys", "maintainer-b.json"));
-
-  return [
-    { did: proposer.did, publicJwk: proposer.publicJwk },
-    { did: maintainerA.did, publicJwk: maintainerA.publicJwk },
-    { did: maintainerB.did, publicJwk: maintainerB.publicJwk },
-  ];
-}
-
-async function policyFromConfig(file: string): Promise<PolicyConfig> {
-  const config = await readJson<DeploymentConfig>(join(fixturesDir, "configs", file));
-
-  return {
-    defaultRequirement: config.policy.defaultRequirement,
-    policies: config.policy.policies as PolicyConfig["policies"],
-    signerGroups: config.policy.signerGroups,
-  };
-}
+const envelope: ActionEnvelope = {
+  version: "1", type: "ActionEnvelope", proposer: { did: "did:web:actors.example:proposer" as Did },
+  target: { applicationDid: "did:web:app.example" as Did },
+  executionProfile: { id: "did:web:profiles.oma3.org:mcp" as Did, format: "mcp.toolsCall" },
+  executionPayloadHash: { alg: "sha-256", value: "payload" }, actionId: { value: "action" },
+  createdAt: "2026-09-05T00:00:00.000Z", expiresAt: "2030-09-05T00:00:00.000Z",
+};
 
 describe("buildAuthorizationRequirements", () => {
-  it("builds well-formed requirements bound to the Action Envelope hash", async () => {
-    const actionPackage = await readJson<ActionPackage>(join(fixturesDir, "core", "insufficient-approvals.json"));
-    const verification = await verifyActionPackage(actionPackage, {
-      trustedSigners: await trustedSigners(),
-      trustedApplicationDids: ["did:web:github-mirror.example"],
-      now: FIXTURE_NOW,
-    });
-    if (verification.status !== "verified") {
-      throw new Error("fixture should verify before policy evaluation");
-    }
-
-    const policyResult = evaluatePolicy(actionPackage, verification.verifiedApprovals, await policyFromConfig("github-mirror-adapter-config.json"));
-    if (policyResult.status !== "additionalApprovalsRequired") {
-      throw new Error("fixture should require additional approvals");
-    }
-
-    const adapter = await readJson<KeyFixture>(join(fixturesDir, "test-keys", "adapter.json"));
+  it("binds and preserves one recursive unmet expression", () => {
+    const signerA = "did:web:actors.example:a" as Did;
+    const signerB = "did:web:actors.example:b" as Did;
     const requirements = buildAuthorizationRequirements({
-      actionEnvelope: actionPackage.actionEnvelope,
-      unsatisfiedRules: policyResult.unsatisfiedRules,
-      verifierDid: adapter.did,
+      actionEnvelope: envelope,
+      verifierDid: "did:web:verifier.example:main" as Did,
+      unsatisfiedRequirement: {
+        type: "anyOf",
+        requirements: [
+          { type: "threshold", threshold: 1, eligibleSigners: [signerA], decision: "approve" },
+          { type: "allOf", requirements: [
+            { type: "threshold", threshold: 1, eligibleSigners: [signerB], decision: "abstain" },
+          ] },
+        ],
+      },
     });
 
     expect(requirements).toMatchObject({
-      version: "1",
-      type: "AuthorizationRequirements",
-      actionEnvelopeHash: computeJsonHash(actionPackage.actionEnvelope),
+      version: "1", type: "AuthorizationRequirements",
+      actionEnvelopeHash: computeJsonHash(envelope),
       result: "additionalApprovalsRequired",
-      verifier: {
-        did: adapter.did,
-      },
+      verifier: { did: "did:web:verifier.example:main" },
       approvalRequirements: {
         anyOf: [
-          {
-            type: "threshold",
-            threshold: 2,
-            decision: "approve",
-          },
+          { type: "threshold", eligibleSigners: [signerA], decision: "approve" },
+          { type: "allOf", requirements: [{ eligibleSigners: [signerB], decision: "abstain" }] },
         ],
       },
-      expiresAt: actionPackage.actionEnvelope.expiresAt,
+      expiresAt: envelope.expiresAt,
     });
-    if (requirements.result !== "additionalApprovalsRequired") {
-      throw new Error("requirements should request additional approvals");
-    }
-    expect(requirements.approvalRequirements.anyOf?.[0].eligibleSigners).toHaveLength(2);
   });
 });

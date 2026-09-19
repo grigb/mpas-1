@@ -966,6 +966,8 @@ At least one of `anyOf`, `allOf`, or `overrideSigners` SHOULD be present when re
 | decision        | Optional | Decision value that satisfies the requirement. Defaults to `approve`. |
 | description     | Optional | Human-readable explanation of the requirement.                        |
 
+The `decision` value in a policy-generated threshold requirement MUST be `approve`, `propose`, or `abstain`. A `reject` decision records opposition and MUST NOT be emitted as an ordinary threshold path.
+
 Example:
 
 ```json
@@ -979,6 +981,37 @@ Example:
   ],
   "decision": "approve",
   "description": "Requires approval from at least 2 maintainers."
+}
+```
+
+##### 5.8.6.1 Composed Approval Requirement
+
+A threshold requirement or composed group is an approval requirement. A composed group has `type` equal to `allOf` or `anyOf` and a non-empty `requirements` array whose items are approval requirements. This grammar is recursive. An `allOf` group is satisfied only when every child is satisfied. An `anyOf` group is satisfied when at least one child is satisfied. Empty groups, unknown group types, and undeclared members are malformed.
+
+Example:
+
+```json
+{
+  "type": "anyOf",
+  "requirements": [
+    {
+      "type": "allOf",
+      "requirements": [
+        {
+          "type": "threshold",
+          "threshold": 1,
+          "eligibleSigners": ["did:web:alice.example.com"],
+          "decision": "approve"
+        },
+        {
+          "type": "threshold",
+          "threshold": 1,
+          "eligibleSigners": ["did:web:bob.example.com"],
+          "decision": "abstain"
+        }
+      ]
+    }
+  ]
 }
 ```
 
@@ -2013,13 +2046,13 @@ The following structural constraints are derived from the entire specification â
 
 ### From Section 5.8.5 (Approval Requirements)
 - At least one of `anyOf`, `allOf`, or `overrideSigners` SHOULD be present â€” enforced as strict quality gate.
-- `anyOf`/`allOf` contain ThresholdRequirement objects.
+- `anyOf`/`allOf` contain recursive ApprovalRequirement objects: threshold leaves or non-empty `allOf`/`anyOf` groups.
 
 ### From Section 5.8.6 (Threshold Requirement)
 - `type` MUST be `"threshold"`.
 - `threshold` required (positive integer).
 - `eligibleSigners` required (non-empty array of DIDs).
-- `decision` optional (defaults to `approve`).
+- `decision` optional (defaults to `approve`) and limited to `approve`, `propose`, or `abstain` for an ordinary threshold path.
 - `description` optional.
 
 ### From Section 5.8.7 (Override Signers)
@@ -2466,7 +2499,8 @@ All standalone schemas use `$ref` to definitions. The combined `mpas-base-0.2.sc
           "minItems": 1
         },
         "decision": {
-          "$ref": "definitions.json#/$defs/Decision",
+          "type": "string",
+          "enum": ["approve", "propose", "abstain"],
           "description": "Decision value that satisfies this requirement. Defaults to 'approve' if omitted."
         },
         "description": {
@@ -2475,6 +2509,28 @@ All standalone schemas use `$ref` to definitions. The combined `mpas-base-0.2.sc
       },
       "required": ["type", "threshold", "eligibleSigners"],
       "additionalProperties": false
+    },
+    "ApprovalRequirementGroup": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["allOf", "anyOf"]
+        },
+        "requirements": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ApprovalRequirement" },
+          "minItems": 1
+        }
+      },
+      "required": ["type", "requirements"],
+      "additionalProperties": false
+    },
+    "ApprovalRequirement": {
+      "oneOf": [
+        { "$ref": "#/$defs/ThresholdRequirement" },
+        { "$ref": "#/$defs/ApprovalRequirementGroup" }
+      ]
     },
     "OverrideSigner": {
       "type": "object",
@@ -2497,13 +2553,13 @@ All standalone schemas use `$ref` to definitions. The combined `mpas-base-0.2.sc
       "properties": {
         "anyOf": {
           "type": "array",
-          "items": { "$ref": "#/$defs/ThresholdRequirement" },
+          "items": { "$ref": "#/$defs/ApprovalRequirement" },
           "minItems": 1,
           "description": "Alternative approval paths. If any path is satisfied, the Action may be authorized."
         },
         "allOf": {
           "type": "array",
-          "items": { "$ref": "#/$defs/ThresholdRequirement" },
+          "items": { "$ref": "#/$defs/ApprovalRequirement" },
           "minItems": 1,
           "description": "Approval paths that must all be satisfied."
         },
@@ -2618,7 +2674,7 @@ All standalone schemas use `$ref` to definitions. The combined `mpas-base-0.2.sc
 | 17  | `approvalRequirements` MUST be present when result is `additionalApprovalsRequired`                                                     | `if/then` conditional                                                 |
 | 18  | Threshold Requirement `threshold` MUST be a positive integer                                                                            | `type: integer`, `minimum: 1`                                         |
 | 19  | Threshold Requirement `eligibleSigners` MUST be non-empty array of DIDs                                                                 | `minItems: 1` + DID items                                             |
-| 20  | ApprovalRequirements MUST have at least one of `anyOf`, `allOf`, `overrideSigners`                                                      | `anyOf` with required checks                                          |
+| 20  | ApprovalRequirements MUST have at least one of `anyOf`, `allOf`, `overrideSigners`; nested groups MUST be non-empty and closed             | recursive `ApprovalRequirement` plus required checks                  |
 | 21  | Override Signer `permissions` MUST be non-empty                                                                                         | `minItems: 1`                                                         |
 | 22  | Execution Receipt `format` MUST be `"jws"`                                                                                              | `const: "jws"`                                                        |
 | 23  | Execution Receipt `signature` MUST be JWS Compact Serialization                                                                         | `pattern`                                                             |

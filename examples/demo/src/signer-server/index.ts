@@ -26,6 +26,7 @@ import {
 import { RoutingValidationError } from "@oma3/mpas/routing";
 import { ApprovalBuilder } from "@oma3/mpas/approval-builder";
 import { verifyJsonHash } from "@oma3/mpas/hash";
+import { isSignerEligibleForDecision } from "@oma3/mpas/approval-requirements";
 import type {
   ActionEnvelope,
   Approval,
@@ -340,16 +341,7 @@ function reviewSetIntegrityError(
     return signerError("REVIEW_SET_INTEGRITY_ERROR", "The tool decision does not match the requested decision.", actionId);
   }
   const requirements = authorizationRequirements.approvalRequirements;
-  const thresholdPaths = [...(requirements.anyOf ?? []), ...(requirements.allOf ?? [])];
-  const matchesThreshold = thresholdPaths.some(
-    (requirement) =>
-      requirement.eligibleSigners.includes(signerDid) &&
-      (requirement.decision ?? "approve") === decision,
-  );
-  const matchesOverride = (requirements.overrideSigners ?? []).some(
-    (override) => override.signer === signerDid && override.permissions.includes(decision),
-  );
-  if (!matchesThreshold && !matchesOverride) {
+  if (!isSignerEligibleForDecision(requirements, signerDid, decision)) {
     return signerError("SIGNER_NOT_ELIGIBLE", "The configured Signer is not eligible for the requested decision.", actionId);
   }
   return undefined;

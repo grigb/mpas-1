@@ -19,6 +19,7 @@ import type {
   Timestamp,
 } from "../types/mpas.js";
 import { computeJsonHash } from "../utils/hash.js";
+import { validateApprovalRequirements } from "./approval-requirements.js";
 import { parseActionPackage, validateActionEnvelope } from "./verification.js";
 
 /** Maximum length, in characters, of an MPAS body-level idempotency key. */
@@ -475,46 +476,12 @@ function parseApprovalRequest(value: unknown, path: string): ApprovalRequest {
     if (auth.expiresAt !== undefined) requireTimestamp(auth.expiresAt, `${authPath}.expiresAt`);
     if (auth.result === "additionalApprovalsRequired" || auth.approvalRequirements !== undefined) {
       const requirementsPath = `${authPath}.approvalRequirements`;
-      const requirements = requireRecord(auth.approvalRequirements, requirementsPath, "An approval path is required.",
-        ["anyOf", "allOf", "overrideSigners"]);
-      if (Object.keys(requirements).length === 0) {
-        throw new RoutingValidationError("An approval path is required.", requirementsPath);
-      }
-      for (const [kind, entries] of Object.entries(requirements)) {
-        const entriesPath = `${requirementsPath}.${kind}`;
-        if (!Array.isArray(entries) || entries.length === 0) {
-          throw new RoutingValidationError("Approval paths must be a non-empty array.", entriesPath);
-        }
-        entries.forEach((entry, index) => {
-          const entryPath = `${entriesPath}[${index}]`;
-          const override = kind === "overrideSigners";
-          const rule = requireRecord(entry, entryPath, "Approval path must be an object.", override
-            ? ["signer", "permissions", "description"]
-            : ["type", "threshold", "eligibleSigners", "decision", "description"]);
-          if (rule.description !== undefined && typeof rule.description !== "string") {
-            throw new RoutingValidationError("Description must be a string.", `${entryPath}.description`);
-          }
-          if (override) requireDid(rule.signer, `${entryPath}.signer`);
-          else {
-            requireLiteral(rule.type, "threshold", `${entryPath}.type`);
-            if (!Number.isInteger(rule.threshold) || (rule.threshold as number) < 1) {
-              throw new RoutingValidationError("Threshold must be a positive integer.", `${entryPath}.threshold`);
-            }
-            if (rule.decision !== undefined) requireDecision(rule.decision, `${entryPath}.decision`);
-          }
-          const member = override ? "permissions" : "eligibleSigners";
-          const values = rule[member];
-          if (!Array.isArray(values) || values.length === 0) {
-            throw new RoutingValidationError(`${member} must be a non-empty array.`, `${entryPath}.${member}`);
-          }
-          values.forEach((item, itemIndex) => {
-            const itemPath = `${entryPath}.${member}[${itemIndex}]`;
-            if (!override) requireDid(item, itemPath);
-            else if (typeof item !== "string" || item.length === 0) {
-              throw new RoutingValidationError("Permission must be a non-empty string.", itemPath);
-            }
-          });
-        });
+      const validation = validateApprovalRequirements(auth.approvalRequirements);
+      if (!validation.ok) {
+        throw new RoutingValidationError(
+          validation.message,
+          validation.path === "$" ? requirementsPath : requirementsPath + validation.path.slice(1),
+        );
       }
     }
   }

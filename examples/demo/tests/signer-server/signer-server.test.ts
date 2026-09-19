@@ -6,7 +6,12 @@ import { describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { computeJsonHash } from "@oma3/mpas/hash";
-import { verifyMpasRfc9421, type CoordinationActionUpdate } from "@oma3/mpas";
+import {
+  verifyMpasRfc9421,
+  type ApprovalRequirements,
+  type CoordinationActionUpdate,
+  type ThresholdRequirement,
+} from "@oma3/mpas";
 import { SignerServer } from "../../src/signer-server/index.js";
 import type { Approval, CoordinationPollResponse, SignerReviewSet } from "../../src/signer-server/types.js";
 
@@ -15,6 +20,12 @@ const testKeysDir = fileURLToPath(new URL("../fixtures/test-keys/", import.meta.
 
 async function readJson<T>(path: string): Promise<T> {
   return JSON.parse(await readFile(path, "utf8")) as T;
+}
+
+function firstThreshold(requirements: ApprovalRequirements): ThresholdRequirement {
+  const requirement = requirements.anyOf?.[0];
+  if (!requirement || requirement.type !== "threshold") throw new Error("fixture must start with a threshold path");
+  return requirement;
 }
 
 describe("SignerServer", () => {
@@ -76,7 +87,8 @@ describe("SignerServer", () => {
       request.requestedDecision = "reject";
       const auth = request.signerReviewSet.authorizationRequirements;
       if (auth?.result !== "additionalApprovalsRequired") throw new Error("Missing fixture path");
-      auth.approvalRequirements.anyOf![0].decision = "reject";
+      // Deliberately supply malformed wire data to exercise the runtime rejection control.
+      Object.assign(firstThreshold(auth.approvalRequirements), { decision: "reject" });
     }
     Object.assign(poll, { extra: true });
     const { result, submissions } = await callSignerFixture(poll, tool, request.actionRef.actionId.value, transport === "MCP");
@@ -185,11 +197,38 @@ describe("SignerServer", () => {
       request.requestedDecision = decision;
       const auth = request.signerReviewSet.authorizationRequirements;
       if (auth?.result !== "additionalApprovalsRequired") throw new Error("Missing fixture path");
-      delete auth.approvalRequirements.anyOf![0].decision;
+      delete firstThreshold(auth.approvalRequirements).decision;
       const { result, submissions } = await callSignerFixture(poll, `mpas_${decision}`, request.actionRef.actionId.value, true);
       if (decision === "approve") expect(result.isError).toBeUndefined();
       else expect(result).toMatchObject({ isError: true, structuredContent: { code: "SIGNER_NOT_ELIGIBLE" } });
       expect(submissions).toBe(decision === "approve" ? 1 : 0);
+    }
+  });
+
+  it("finds approval eligibility inside recursive paths", async () => {
+    const poll = await readJson<CoordinationPollResponse>(join(fixturesDir, "responses", "coordination-pending-actions.json"));
+    const request = poll.approvalRequests[0];
+    const auth = request.signerReviewSet.authorizationRequirements;
+    if (auth?.result !== "additionalApprovalsRequired") throw new Error("Missing fixture path");
+    const leaf = structuredClone(firstThreshold(auth.approvalRequirements));
+    auth.approvalRequirements.anyOf = [{ type: "anyOf", requirements: [{ type: "allOf", requirements: [leaf] }] }];
+
+    const { result, submissions } = await callSignerFixture(poll, "mpas_approve", request.actionRef.actionId.value, true);
+    expect(result.isError).toBeUndefined();
+    expect(submissions).toBe(1);
+  });
+
+  it("does not expose a propose or abstain signing tool through the four-tool profile", async () => {
+    for (const decision of ["propose", "abstain"] as const) {
+      const poll = await readJson<CoordinationPollResponse>(join(fixturesDir, "responses", "coordination-pending-actions.json"));
+      const request = poll.approvalRequests[0];
+      request.requestedDecision = decision;
+      const auth = request.signerReviewSet.authorizationRequirements;
+      if (auth?.result !== "additionalApprovalsRequired") throw new Error("Missing fixture path");
+      firstThreshold(auth.approvalRequirements).decision = decision;
+      const { result, submissions } = await callSignerFixture(poll, "mpas_review_action", request.actionRef.actionId.value, true);
+      expect(result).toMatchObject({ isError: true, structuredContent: { code: "REVIEW_SET_INTEGRITY_ERROR" } });
+      expect(submissions).toBe(0);
     }
   });
 
@@ -350,7 +389,10 @@ describe("SignerServer", () => {
     if (!requirements || requirements.result !== "additionalApprovalsRequired") {
       throw new Error("fixture must contain additional approval requirements");
     }
-    requirements.approvalRequirements.anyOf![0].decision = "reject";
+    requirements.approvalRequirements.overrideSigners = [{
+      signer: firstThreshold(requirements.approvalRequirements).eligibleSigners[0],
+      permissions: ["reject"],
+    }];
     let submittedApproval: Approval | undefined;
     const coordination = await startMockCoordination(async (incoming, response) => {
       if (incoming.url === "/mpas/v1/coordination/poll") {
@@ -399,7 +441,10 @@ describe("SignerServer", () => {
     if (!requirements || requirements.result !== "additionalApprovalsRequired") {
       throw new Error("fixture must contain additional approval requirements");
     }
-    requirements.approvalRequirements.anyOf![0].decision = "reject";
+    requirements.approvalRequirements.overrideSigners = [{
+      signer: firstThreshold(requirements.approvalRequirements).eligibleSigners[0],
+      permissions: ["reject"],
+    }];
     const coordination = await startMockCoordination((_request, response) => {
       if (_request.url === "/mpas/v1/coordination/poll") {
         sendJson(response, pollResponse);
@@ -590,7 +635,7 @@ describe("SignerServer", () => {
     ["Signer eligibility", (poll: CoordinationPollResponse) => {
       const requirements = poll.approvalRequests[0].signerReviewSet.authorizationRequirements;
       if (requirements?.result === "additionalApprovalsRequired") {
-        requirements.approvalRequirements.anyOf![0].eligibleSigners = ["did:web:not-this-signer.example"];
+        firstThreshold(requirements.approvalRequirements).eligibleSigners = ["did:web:not-this-signer.example"];
       }
     }, "SIGNER_NOT_ELIGIBLE"],
   ])("fails closed for %s", async (_label, mutate, expectedCode) => {

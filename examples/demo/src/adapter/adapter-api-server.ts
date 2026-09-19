@@ -143,8 +143,12 @@ export function createAdapterApiServer(options: HttpEndpointOptions): FastifyIns
 
     const loadedConfig = options.configsByApplicationDid.get(pkg.actionEnvelope.target.applicationDid);
     if (!loadedConfig) {
-      trace.emit("dispatch", { actionId, result: "rejected", code: "UNKNOWN_APPLICATION" });
-      return rejection(pkg, options, envelopeHash, "rejected", "UNKNOWN_APPLICATION", "Unknown application.");
+      trace.emit("dispatch", { actionId, result: "notSupported", code: "UNKNOWN_APPLICATION" });
+      return actionResponse(options, {
+        result: "notSupported",
+        actionEnvelopeHash: envelopeHash,
+        error: { code: "UNKNOWN_APPLICATION", message: "Unknown application." },
+      });
     }
 
     // Stateless deterministic rejections (record nothing, repeatable verdict).
@@ -267,6 +271,14 @@ export function createAdapterApiServer(options: HttpEndpointOptions): FastifyIns
           error: { code: policyResult.code, message: policyResult.message },
         });
       }
+      if (policyResult.status === "notSupported") {
+        trace.emit("verification_step", { actionId, step: "policy_evaluation", passed: false, code: policyResult.code });
+        return actionResponse(options, {
+          result: "notSupported",
+          actionEnvelopeHash: envelopeHash,
+          error: { code: policyResult.code, message: policyResult.message },
+        });
+      }
       if (policyResult.status === "rejected") {
         trace.emit("verification_step", { actionId, step: "policy_evaluation", passed: false, code: policyResult.code });
         return rejection(pkg, options, envelopeHash, "rejected", policyResult.code, policyResult.message);
@@ -278,7 +290,7 @@ export function createAdapterApiServer(options: HttpEndpointOptions): FastifyIns
           actionEnvelopeHash: envelopeHash,
           authorizationRequirements: buildAuthorizationRequirements({
             actionEnvelope: pkg.actionEnvelope,
-            unsatisfiedRules: policyResult.unsatisfiedRules,
+            unsatisfiedRequirement: policyResult.unsatisfiedRequirement,
             verifierDid: options.adapterDid,
           }),
         });
@@ -506,11 +518,7 @@ async function prepareTarget(
 }
 
 export function policyFromLoadedConfig(loadedConfig: LoadedDeploymentConfig): PolicyConfig {
-  return {
-    defaultRequirement: loadedConfig.config.policy.defaultRequirement,
-    policies: loadedConfig.config.policy.policies as PolicyConfig["policies"],
-    signerGroups: loadedConfig.config.policy.signerGroups,
-  };
+  return loadedConfig.config.policy;
 }
 
 interface ActionResponseInit {

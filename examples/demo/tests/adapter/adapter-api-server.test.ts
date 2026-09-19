@@ -5,8 +5,9 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
-import { compactVerify, importJWK, type JWK } from "jose";
-import { ActionPackageBuilder, ApprovalBuilder, KeyManager, buildDeliveryEnvelope, parseDispatchRecord, serializeDispatchRecord, signMpasRfc9421, type ActionPackage, type ActionRequest, type DeliveryEnvelope } from "@oma3/mpas";
+import { CompactSign, compactVerify, importJWK, type JWK } from "jose";
+import { canonicalize } from "json-canonicalize";
+import { ActionPackageBuilder, ApprovalBuilder, KeyManager, buildDeliveryEnvelope, parseDispatchRecord, serializeDispatchRecord, signMpasRfc9421, type ActionEnvelope, type ActionPackage, type ActionRequest, type ActionResponse, type Approval, type Decision, type DeliveryEnvelope } from "@oma3/mpas";
 import "../fixtures/action-fixture-clock.js";
 import { loadDeploymentConfigs } from "../../src/adapter/config-loader.js";
 import { FileCredentialProvider } from "../../src/adapter/credential-provider.js";
@@ -19,6 +20,7 @@ import type { Did, ExecutionReceipt, ReceiptPayload } from "../../src/core/types
 import { computeJsonHash } from "../../src/core/verification.js";
 import { TraceLogger } from "../../src/core/trace.js";
 import { createCoordinationApiServer } from "../../src/coordination/coordination-api-server.js";
+import { CoordinationStore } from "../../src/coordination/store.js";
 import { startOAuthProtectedMcpFixture, type OAuthProtectedMcpFixture } from "../fixtures/oauth-protected-mcp.js";
 
 /** Deterministic clock pinned inside the fixture validity window. */
@@ -37,12 +39,31 @@ const httpTargets: OAuthProtectedMcpFixture[] = [];
 
 interface KeyFixture {
   did: Did;
+  kid: string;
   privateJwk: JWK;
   publicJwk: JWK;
 }
 
 async function readJson<T>(path: string): Promise<T> {
   return JSON.parse(await readFile(path, "utf8")) as T;
+}
+
+async function buildSignedDecision(
+  envelope: ActionEnvelope,
+  signer: KeyFixture,
+  decision: Decision,
+): Promise<Approval> {
+  const actionEnvelopeHash = computeJsonHash(envelope);
+  const createdAt = new Date().toISOString();
+  const payload = { type: "ApprovalPayload", actionEnvelopeHash, decision, signerDid: signer.did, createdAt };
+  const key = await importJWK(signer.privateJwk, "EdDSA");
+  const value = await new CompactSign(Buffer.from(canonicalize(payload)))
+    .setProtectedHeader({ alg: "EdDSA", kid: signer.kid })
+    .sign(key);
+  return {
+    version: "1", type: "Approval", actionEnvelopeHash, decision,
+    signature: { format: "jws", value }, createdAt,
+  };
 }
 
 async function credentialDir() {
@@ -102,9 +123,15 @@ async function submitFixture(app: FastifyInstance, fixtureFile: string) {
   });
 }
 
-async function makeTargetConfigDir(server: string, timeoutMs: number, command = "node") {
+async function makeTargetConfigDir(
+  server: string,
+  timeoutMs: number,
+  command = "node",
+  sourceConfig = "policy-fixtures/github-auto-approve.json",
+  mutate?: (config: Record<string, unknown>) => void,
+) {
   const dir = await mkdtemp(join(tmpdir(), "mpas-http-configs-"));
-  const config = await readJson<Record<string, unknown>>(join(fixturesDir, "configs", "policy-fixtures", "github-auto-approve.json"));
+  const config = await readJson<Record<string, unknown>>(join(fixturesDir, "configs", sourceConfig));
   config.plugin = {
     ...(config.plugin as Record<string, unknown>),
     path: join(fixturesDir, "plugins", "github-mirror-plugin.json"),
@@ -118,6 +145,7 @@ async function makeTargetConfigDir(server: string, timeoutMs: number, command = 
     },
     timeoutMs,
   };
+  mutate?.(config);
   await writeFile(join(dir, "github-target.json"), `${JSON.stringify(config, null, 2)}\n`);
   return dir;
 }
@@ -130,7 +158,10 @@ async function verifyReceiptPayload(receipt: ExecutionReceipt): Promise<ReceiptP
 }
 
 /** A real task-owned MCP process records initialization and tools/call separately. */
-async function countingTarget() {
+async function countingTarget(
+  sourceConfig = "policy-fixtures/github-auto-approve.json",
+  mutate?: (config: Record<string, unknown>) => void,
+) {
   const dir = await mkdtemp(join(realpathSync(tmpdir()), "mpas-ledger-target-"));
   const eventsPath = join(dir, "events.jsonl"), server = join(dir, "server.mjs");
   await writeFile(server, `
@@ -147,7 +178,7 @@ lines.on("line", line => {
   process.stdout.write(JSON.stringify({jsonrpc:"2.0",id:request.id,result})+"\\n");
 });
 `);
-  const configDir = await makeTargetConfigDir(server, 1000);
+  const configDir = await makeTargetConfigDir(server, 1000, "node", sourceConfig, mutate);
   const journalPath = join(dir, "dispatch-ledger.jsonl");
   const store = new FileDispatchJournal(journalPath); stores.push(store);
   const ledger = new DispatchLedger(store);
@@ -352,6 +383,8 @@ describe("HTTP endpoint", () => {
       if (scenario === "positive") {
         expect(body).toMatchObject({ result: "executed", executionResult: { content: [{ type: "text", text: "authorized" }] } });
         expect((await verifyReceiptPayload(body.executionReceipt)).result).toBe("executed");
+      } else if (scenario === "application") {
+        expect(body).toMatchObject({ result: "notSupported", error: { code: "UNKNOWN_APPLICATION" } });
       } else if (scenario === "profile" || scenario === "format") {
         expect(body).toMatchObject({ result: "notSupported", error: { code: "UNSUPPORTED_EXECUTION_PROFILE" } });
       } else if (scenario === "payload shape") {
@@ -361,7 +394,7 @@ describe("HTTP endpoint", () => {
       } else if (scenario === "payload hash" && route === "authenticated relay") {
         expect(body.error.code).toBe("artifact_hash_mismatch");
       } else {
-        const code = scenario === "application" ? "UNKNOWN_APPLICATION" : scenario === "payload hash" ? "PAYLOAD_HASH_MISMATCH"
+        const code = scenario === "payload hash" ? "PAYLOAD_HASH_MISMATCH"
           : scenario === "proposer" ? "PROPOSER_NOT_AUTHORIZED" : "APPROVAL_BUNDLE_INVALID";
         expect(body).toMatchObject({ result: "rejected", error: { code } });
       }
@@ -417,7 +450,11 @@ describe("HTTP endpoint", () => {
     const request = { method: "POST" as const, url: "/mpas/v1/action", payload: { version: "1", type: "ActionRequest", actionPackage: pkg } };
     const first = await target.app.inject(request);
     expect(first.json()).toMatchObject({ result: "rejected", error: { code: "OPERATION_NOT_GOVERNED" } });
-    target.loaded.config.policy.policies = { create_issue_mirror: [] };
+    target.loaded.config.policy.policies = {
+      create_issue_mirror: [{
+        requirements: { type: "threshold", threshold: 2, eligibleSignerGroup: "maintainers", decision: "approve" },
+      }],
+    };
     const second = await target.app.inject(request);
     expect(second.json()).toMatchObject({ result: "additionalApprovalsRequired" });
     const known = await target.builder.buildFromToolCall("delete_branch_mirror", { owner: "synthetic", repo: "test", branch: "draft" });
@@ -681,6 +718,110 @@ describe("HTTP endpoint", () => {
     // Repeating the same package yields the same verdict — the actionId was not consumed.
     const second = await submitFixture(app, "insufficient-approvals.json");
     expect(second.json()).toMatchObject({ result: "additionalApprovalsRequired" });
+  });
+
+  it("round trips one signed nested policy through coordination before exactly one target dispatch", async () => {
+    const target = await countingTarget("github-mirror-adapter-config.json", (config) => {
+      const policy = config.policy as {
+        signerGroups: Record<string, Did[]>;
+        policies: Record<string, Array<Record<string, unknown>>>;
+      };
+      const [maintainerA, maintainerB] = policy.signerGroups.maintainers;
+      policy.policies.merge_pull_request_mirror[0].requirements = {
+        type: "anyOf",
+        requirements: [
+          {
+            type: "allOf",
+            requirements: [
+              { type: "threshold", threshold: 1, eligibleSigners: [maintainerA], decision: "approve" },
+              { type: "threshold", threshold: 1, eligibleSigners: [maintainerB], decision: "abstain" },
+            ],
+          },
+          {
+            type: "allOf",
+            requirements: [
+              { type: "threshold", threshold: 1, eligibleSigners: [maintainerA], decision: "abstain" },
+              { type: "threshold", threshold: 1, eligibleSigners: [maintainerB], decision: "approve" },
+            ],
+          },
+        ],
+      };
+    });
+    const partialPackage = await readJson<ActionPackage>(join(fixturesDir, "core", "insufficient-approvals.json"));
+    const first = await target.app.inject({
+      method: "POST", url: "/mpas/v1/action", headers: { "content-type": "application/mpas+json" },
+      payload: { version: "1", type: "ActionRequest", actionPackage: partialPackage },
+    });
+    const response = first.json() as ActionResponse;
+    expect(response).toMatchObject({
+      result: "additionalApprovalsRequired",
+      authorizationRequirements: {
+        approvalRequirements: {
+          anyOf: [
+            { type: "allOf", requirements: [{ type: "threshold" }, { type: "threshold" }] },
+            { type: "allOf", requirements: [{ type: "threshold" }, { type: "threshold" }] },
+          ],
+        },
+      },
+    });
+    if (!response.authorizationRequirements || response.authorizationRequirements.result !== "additionalApprovalsRequired") {
+      throw new Error("adapter did not return additional-approval requirements");
+    }
+
+    const decisions = async (entries: ReadonlyArray<readonly ["maintainer-a" | "maintainer-b", "approve" | "abstain"]>) => {
+      const approvals = [];
+      for (const [keyName, decision] of entries) {
+        const key = await readJson<KeyFixture>(join(fixturesDir, "test-keys", `${keyName}.json`));
+        approvals.push(await buildSignedDecision(partialPackage.actionEnvelope, key, decision));
+      }
+      return approvals;
+    };
+    const wrongDecisionPackage = structuredClone(partialPackage);
+    wrongDecisionPackage.approvalBundle.approvals.push(...await decisions([
+      ["maintainer-a", "approve"], ["maintainer-b", "approve"],
+    ]));
+    expect((await target.app.inject({
+      method: "POST", url: "/mpas/v1/action", headers: { "content-type": "application/mpas+json" },
+      payload: { version: "1", type: "ActionRequest", actionPackage: wrongDecisionPackage },
+    })).json()).toMatchObject({ result: "rejected", error: { code: "POLICY_REQUIREMENT_UNREACHABLE" } });
+
+    const outsiderPackage = structuredClone(partialPackage);
+    const outsider = await readJson<KeyFixture>(join(fixturesDir, "test-keys", "adapter.json"));
+    outsiderPackage.approvalBundle.approvals.push(await new ApprovalBuilder({
+      keyManager: KeyManager.fromJwk(outsider.privateJwk),
+    }).buildApproval(partialPackage.actionEnvelope, "approve"));
+    expect((await target.app.inject({
+      method: "POST", url: "/mpas/v1/action", headers: { "content-type": "application/mpas+json" },
+      payload: { version: "1", type: "ActionRequest", actionPackage: outsiderPackage },
+    })).json()).toMatchObject({ result: "rejected", error: { code: "APPROVAL_BUNDLE_INVALID" } });
+
+    const coordination = new CoordinationStore();
+    coordination.createWorkflow({
+      version: "1", type: "CoordinationActionRequest",
+      actionPackage: partialPackage,
+      authorizationRequirements: response.authorizationRequirements,
+    });
+    const maintainerApprovals = await decisions([["maintainer-a", "abstain"], ["maintainer-b", "approve"]]);
+    expect(maintainerApprovals).toHaveLength(2);
+    for (const approval of maintainerApprovals) {
+      coordination.submitApproval({
+        version: "1", type: "CoordinationApprovalSubmission",
+        actionEnvelopeHash: response.authorizationRequirements.actionEnvelopeHash,
+        approval,
+      });
+    }
+    const ready = coordination.poll(partialPackage.actionEnvelope.proposer.did).actionUpdates[0];
+    expect(ready.state).toBe("readyForResubmission");
+    if (!ready.actionPackage) throw new Error("coordination did not assemble the completed package");
+    const final = await target.app.inject({
+      method: "POST", url: "/mpas/v1/action", headers: { "content-type": "application/mpas+json" },
+      payload: { version: "1", type: "ActionRequest", actionPackage: ready.actionPackage },
+    });
+    expect(final.json()).toMatchObject({ result: "executed", executionReceipt: { type: "ExecutionReceipt" } });
+    expect(await target.countAndCheckClosed()).toMatchObject({ calls: 1 });
+    console.log(JSON.stringify({ case: "recursive policy round trip", branch: "second mixed-decision alternative",
+      signedDecisions: ["abstain", "approve"], proposerOnlyEffects: 0, wrongDecisionEffects: 0,
+      outsiderEffects: 0, targetEffects: 1 }));
   });
 
   it("accepts a canonical multi-recipient Action envelope when the configured Verifier DID is a recipient", async () => {

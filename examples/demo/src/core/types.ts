@@ -24,6 +24,8 @@ export type {
   ActionPackage,
   AuthorizationResult,
   ThresholdRequirement,
+  ApprovalRequirement,
+  ApprovalRequirementGroup,
   OverrideSigner,
   ApprovalRequirements,
   AuthorizationRequirements,

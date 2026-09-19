@@ -112,9 +112,16 @@ export interface ThresholdRequirement {
   type: "threshold";
   threshold: number;
   eligibleSigners: Did[];
-  decision?: Decision;
+  decision?: Exclude<Decision, "reject">;
   description?: string;
 }
+
+export interface ApprovalRequirementGroup {
+  type: "allOf" | "anyOf";
+  requirements: ApprovalRequirement[];
+}
+
+export type ApprovalRequirement = ThresholdRequirement | ApprovalRequirementGroup;
 
 export interface OverrideSigner {
   signer: Did;
@@ -123,8 +130,8 @@ export interface OverrideSigner {
 }
 
 export interface ApprovalRequirements {
-  anyOf?: ThresholdRequirement[];
-  allOf?: ThresholdRequirement[];
+  anyOf?: ApprovalRequirement[];
+  allOf?: ApprovalRequirement[];
   overrideSigners?: OverrideSigner[];
 }
 

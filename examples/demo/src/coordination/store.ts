@@ -14,7 +14,14 @@ import type {
   Hash,
   ThresholdRequirement,
 } from "../core/types.js";
-import { computeIdempotencyFingerprint, evaluateApprovalRequirements } from "@oma3/mpas";
+import {
+  approvalRequirementDecisionsForSigner,
+  approvalRequirementThresholds,
+  computeIdempotencyFingerprint,
+  evaluateApprovalRequirements,
+  isSignerEligibleForDecision,
+  validateApprovalRequirements,
+} from "@oma3/mpas";
 import { computeJsonHash } from "../core/verification.js";
 import type {
   ActionRef,
@@ -450,9 +457,7 @@ export class CoordinationStore {
   isEligibleSigner(actionEnvelopeHash: string, did: Did): boolean {
     const stored = this.actionsByEnvelopeHash.get(actionEnvelopeHash);
     return stored
-      ? thresholdsFor(stored.authorizationRequirements.approvalRequirements).some((threshold) =>
-          threshold.eligibleSigners.includes(did),
-        ) || (stored.authorizationRequirements.approvalRequirements.overrideSigners ?? []).some((entry) => entry.signer === did)
+      ? approvalRequirementDecisionsForSigner(stored.authorizationRequirements.approvalRequirements, did).length > 0
       : false;
   }
 
@@ -462,7 +467,7 @@ export class CoordinationStore {
     return [...new Set<Did>([
       stored.actionPackage.actionEnvelope.proposer.did,
       stored.authorizationRequirements.verifier.did,
-      ...thresholdsFor(stored.authorizationRequirements.approvalRequirements).flatMap((threshold) => threshold.eligibleSigners),
+      ...approvalRequirementThresholds(stored.authorizationRequirements.approvalRequirements).flatMap((threshold) => threshold.eligibleSigners),
       ...(stored.authorizationRequirements.approvalRequirements.overrideSigners ?? []).map((entry) => entry.signer),
     ])];
   }
@@ -563,7 +568,7 @@ export class CoordinationStore {
     // that DID eligible for this exact decision.
     if (
       payload.signerDid === stored.actionPackage.actionEnvelope.proposer.did &&
-      !isEligibleForDecision(
+      !isSignerEligibleForDecision(
         stored.authorizationRequirements.approvalRequirements,
         payload.signerDid,
         payload.decision,
@@ -596,16 +601,12 @@ export class CoordinationStore {
   }
 
   private approvalRequestFor(stored: StoredAction, did: Did): ApprovalRequest | undefined {
-    const requirement = thresholdsFor(stored.authorizationRequirements.approvalRequirements).find((threshold) =>
-      threshold.eligibleSigners.includes(did),
+    const decisions = approvalRequirementDecisionsForSigner(
+      stored.authorizationRequirements.approvalRequirements,
+      did,
     );
-    const override = (stored.authorizationRequirements.approvalRequirements.overrideSigners ?? [])
-      .find((entry) => entry.signer === did);
-    if (!requirement && !override) {
-      return undefined;
-    }
-
-    const decision = requirement?.decision ?? (override?.permissions.includes("approve") ? "approve" : "reject");
+    if (decisions.length === 0) return undefined;
+    const decision = decisions.length === 1 ? decisions[0] : undefined;
     const alreadyResponded = stored.approvals.some((entry) => entry.signerDid === did);
     if (alreadyResponded) {
       return undefined;
@@ -624,7 +625,7 @@ export class CoordinationStore {
       type: "ApprovalRequest",
       actionRef: stored.actionRef,
       signerReviewSet,
-      requestedDecision: decision,
+      ...(decision !== undefined ? { requestedDecision: decision } : {}),
     };
   }
 }
@@ -690,7 +691,7 @@ function buildCompletedActionPackage(stored: StoredAction): ActionPackage {
 }
 
 function progressFor(requirements: ApprovalRequirements, approvals: StoredApproval[]): CoordinationProgress {
-  const thresholds = thresholdsFor(requirements);
+  const thresholds = approvalRequirementThresholds(requirements);
   const threshold = thresholds.find((candidate) => !isThresholdSatisfied(candidate, approvals)) ?? thresholds[0];
   if (!threshold) {
     return {
@@ -705,7 +706,8 @@ function progressFor(requirements: ApprovalRequirements, approvals: StoredApprov
   return {
     required: threshold.threshold,
     collected: Math.min(approved.size, threshold.threshold),
-    pending: threshold.eligibleSigners.filter((did) => !approvals.some((entry) => entry.signerDid === did)),
+    pending: [...new Set(thresholds.flatMap((entry) => entry.eligibleSigners)
+      .filter((did) => !approvals.some((approval) => approval.signerDid === did)))],
   };
 }
 
@@ -720,20 +722,6 @@ function approvedSignersFor(threshold: ThresholdRequirement, decision: Decision,
       .filter((entry) => entry.signerDid && eligible.has(entry.signerDid) && entry.decision === decision)
       .map((entry) => entry.signerDid as Did),
   );
-}
-
-function thresholdsFor(requirements: ApprovalRequirements): ThresholdRequirement[] {
-  return [...(requirements.anyOf ?? []), ...(requirements.allOf ?? [])];
-}
-
-function isEligibleForDecision(requirements: ApprovalRequirements, did: Did, decision: Decision): boolean {
-  const thresholdEligible = thresholdsFor(requirements).some(
-    (threshold) => threshold.eligibleSigners.includes(did) && (threshold.decision ?? "approve") === decision,
-  );
-  const overrideEligible = (requirements.overrideSigners ?? []).some(
-    (entry) => entry.signer === did && entry.permissions.includes(decision),
-  );
-  return thresholdEligible || overrideEligible;
 }
 
 function validateActionPackageBindings(actionPackage: ActionPackage): void {
@@ -777,24 +765,9 @@ function validateAuthorizationRequirements(
       !isRecord(raw.approvalRequirements)) {
     throw new MpasServiceError(400, "INVALID_REQUEST", "Authorization Requirements are malformed.");
   }
-  for (const field of ["anyOf", "allOf"] as const) {
-    const entries = raw.approvalRequirements[field];
-    if (entries !== undefined && !Array.isArray(entries)) {
-      throw new MpasServiceError(400, "INVALID_REQUEST", `approvalRequirements.${field} must be an array.`);
-    }
-    for (const entry of Array.isArray(entries) ? entries : []) {
-      if (!isRecord(entry) || entry.type !== "threshold" || !Array.isArray(entry.eligibleSigners) ||
-          entry.eligibleSigners.some((did) => typeof did !== "string" || !did.startsWith("did:"))) {
-        throw new MpasServiceError(400, "INVALID_REQUEST", "Authorization threshold is malformed.");
-      }
-    }
-  }
-  const rawOverrides = raw.approvalRequirements.overrideSigners;
-  if (rawOverrides !== undefined && (!Array.isArray(rawOverrides) || rawOverrides.some((entry) =>
-    !isRecord(entry) || typeof entry.signer !== "string" || !entry.signer.startsWith("did:") ||
-    !Array.isArray(entry.permissions) || entry.permissions.length === 0 ||
-    entry.permissions.some((permission) => typeof permission !== "string")))) {
-    throw new MpasServiceError(400, "INVALID_REQUEST", "Authorization override Signers are malformed.");
+  const approvalValidation = validateApprovalRequirements(raw.approvalRequirements);
+  if (!approvalValidation.ok) {
+    throw new MpasServiceError(400, "INVALID_REQUEST", `Authorization Requirements are malformed: ${approvalValidation.message}`);
   }
 
   if (requirements.result !== "additionalApprovalsRequired") {
@@ -816,23 +789,6 @@ function validateAuthorizationRequirements(
     }
   }
 
-  const thresholds = thresholdsFor(requirements.approvalRequirements);
-  const overrides = requirements.approvalRequirements.overrideSigners ?? [];
-  if (thresholds.length === 0 && overrides.length === 0) {
-    throw new MpasServiceError(400, "INVALID_REQUEST", "Authorization Requirements contain no approval path.");
-  }
-  for (const threshold of thresholds) {
-    const eligible = new Set(threshold.eligibleSigners);
-    if (eligible.size !== threshold.eligibleSigners.length) {
-      throw new MpasServiceError(400, "INVALID_REQUEST", "Threshold eligibleSigners must be unique.");
-    }
-    if (!Number.isInteger(threshold.threshold) || threshold.threshold < 1 || threshold.threshold > eligible.size) {
-      throw new MpasServiceError(400, "INVALID_REQUEST", "Threshold must be achievable by its eligibleSigners.");
-    }
-  }
-  if (new Set(overrides.map((entry) => entry.signer)).size !== overrides.length) {
-    throw new MpasServiceError(400, "INVALID_REQUEST", "Override Signer DIDs must be unique.");
-  }
 }
 
 function hashesEqual(left: Hash, right: Hash): boolean {

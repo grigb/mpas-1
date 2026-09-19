@@ -148,6 +148,25 @@ describe("routing helpers", () => {
     expect(parseCoordinationPollResponse(poll)).toEqual(poll);
   });
 
+  it("preserves valid recursive approval paths and rejects a deeply malformed leaf", () => {
+    const poll = JSON.parse(readFileSync(new URL("../fixtures/responses/coordination-pending-actions.json", import.meta.url), "utf8"));
+    const approvalRequirements = poll.approvalRequests[0].signerReviewSet.authorizationRequirements.approvalRequirements;
+    const leaf = structuredClone(approvalRequirements.anyOf[0]);
+    approvalRequirements.anyOf = [{
+      type: "anyOf",
+      requirements: [{ type: "allOf", requirements: [leaf] }],
+    }];
+    expect(parseCoordinationPollResponse(poll)).toEqual(poll);
+
+    approvalRequirements.anyOf[0].requirements[0].requirements[0] = {
+      type: "threshold",
+      threshold: 1,
+      eligibleSigners: [observer],
+      decision: "reject",
+    };
+    expect(() => parseCoordinationPollResponse(poll)).toThrow(RoutingValidationError);
+  });
+
   it.each([
     ["", null], ["", {}], ["version", "2"], ["extra", true],
     ["actionRef.extra", true], ["actionRef.actionId.extra", true],

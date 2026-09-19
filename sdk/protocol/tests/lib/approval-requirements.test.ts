@@ -66,6 +66,15 @@ describe("evaluateApprovalRequirements", () => {
     ])).toThrow("conflicting decisions");
   });
 
+  it("keeps an override-only requirement pending until the override acts", () => {
+    const requirements: ApprovalRequirements = {
+      overrideSigners: [{ signer: carol, permissions: ["approve", "reject"] }],
+    };
+    expect(evaluateApprovalRequirements(requirements, [])).toBe("pending");
+    expect(evaluateApprovalRequirements(requirements, [{ signerDid: carol, decision: "approve" }])).toBe("satisfied");
+    expect(evaluateApprovalRequirements(requirements, [{ signerDid: carol, decision: "reject" }])).toBe("unreachable");
+  });
+
   it("reports a structurally unachievable threshold as unreachable immediately", () => {
     expect(evaluateApprovalRequirements({
       anyOf: [{ type: "threshold", threshold: 2, eligibleSigners: [alice] }],
