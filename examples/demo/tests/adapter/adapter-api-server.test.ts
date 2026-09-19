@@ -16,6 +16,9 @@ import { DispatchLedger } from "../../src/adapter/dispatch-ledger.js";
 import type { Did, ExecutionReceipt, ReceiptPayload } from "../../src/core/types.js";
 import { computeJsonHash } from "../../src/core/verification.js";
 
+/** Deterministic clock pinned inside the fixture validity window. */
+const FIXTURE_NOW = Date.parse("2026-06-05T19:00:00.000Z");
+
 const fixturesDir = fileURLToPath(new URL("../fixtures/", import.meta.url));
 const slowFixtureServer = fileURLToPath(new URL("../fixtures/adapter/slow-mcp-server.mjs", import.meta.url));
 const errorFixtureServer = fileURLToPath(new URL("../fixtures/adapter/error-mcp-server.mjs", import.meta.url));
@@ -60,9 +63,9 @@ async function makeApp(configDir?: string, ledger?: DispatchLedger) {
     credentialProvider: new FileCredentialProvider(await credentialDir()),
     adapterDid: adapter.did,
     adapterSigningKey: adapter.privateJwk,
-    // Test fixtures are signed with a far-future expiresAt; widen the window so the
-    // max-validity guard does not reject them.
-    maxEnvelopeValidityMs: Number.MAX_SAFE_INTEGER,
+    // Pin the clock inside the fixture validity window so the
+    // max-envelope-validity guard and approval-time checks are deterministic.
+    now: FIXTURE_NOW,
     ledger,
   });
   apps.push(app);
