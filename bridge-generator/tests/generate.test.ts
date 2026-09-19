@@ -9,6 +9,12 @@ const mockServer = fileURLToPath(new URL("./fixtures/mock-mcp-server.mjs", impor
 
 async function generate(overrides: Partial<GenerateOptions> = {}): Promise<string> {
   const outDir = overrides.outDir ?? (await mkdtemp(join(tmpdir(), "bridge-gen-")));
+  const upstream = overrides.discover
+    ? await overrides.discover(overrides.upstreamCommand ?? "node", overrides.upstreamArgs ?? [mockServer])
+    : undefined;
+  const toolNames = upstream?.tools.map((tool) => tool.name) ?? ["create_issue", "delete_branch", "merge_pull_request"];
+  const policyPath = join(outDir, `.result-disclosure-${overrides.appName ?? "mockapp"}.json`);
+  await writeFile(policyPath, resultDisclosurePolicy(toolNames));
   await runGenerate({
     appName: "mockapp",
     outDir,
@@ -17,6 +23,8 @@ async function generate(overrides: Partial<GenerateOptions> = {}): Promise<strin
     capturedAt: "2026-07-18T00:00:00.000Z",
     log: () => {},
     ...overrides,
+    ...(upstream ? { discover: async () => upstream } : {}),
+    resultDisclosurePath: overrides.resultDisclosurePath ?? policyPath,
   });
   return join(outDir, overrides.appName ?? "mockapp");
 }
@@ -36,6 +44,7 @@ describe("runGenerate", () => {
       "harness-config.json",
       "plugin.json",
       "registry-entry.json",
+      "result-disclosure.json",
     ]);
     expect((await readdir(join(appDir, "build-artifacts"))).sort()).toEqual([
       "classification.json",
@@ -61,6 +70,7 @@ describe("runGenerate", () => {
     }>(join(appDir, "bridge", "package.json"));
 
     expect(bridgeSource).toContain('new URL("./tools.json", import.meta.url)');
+    expect(bridgeSource).toContain("resultDisclosure: RESULT_DISCLOSURE");
     expect(bridgeSource).not.toContain('"name": "create_issue"');
     expect(tools.map((tool) => tool.name)).toEqual(["create_issue", "delete_branch", "merge_pull_request"]);
     expect(tools[0]).toMatchObject({
@@ -274,6 +284,17 @@ describe("runGenerate", () => {
     await expect(generate({ outDir: join(appDir, "..") })).rejects.toThrow(/Unable to parse existing/);
   });
 });
+
+function resultDisclosurePolicy(toolNames: readonly string[]): string {
+  return `${JSON.stringify({
+    version: "1",
+    type: "MpasResultDisclosurePolicy",
+    operations: Object.fromEntries(toolNames.map((name) => [
+      name,
+      { credentialBearing: name === "delete_branch", resultDisclosure: name === "delete_branch" ? "deny" : "allow" },
+    ])),
+  }, null, 2)}\n`;
+}
 
 describe("regeneration plugin membership (spec §5: old snapshot − old plugin = intentional pass-through)", () => {
   const discoverTools = (names: string[]) => async (command: string, args: string[]) => ({

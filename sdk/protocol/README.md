@@ -137,10 +137,32 @@ Tasks clients and conventional MCP clients:
 - `ProposerBridge` — creates Actions and maps one durable MPAS workflow to either client presentation
 - `BridgeWorkflowEngine` — background workflow: initial Action submission, replacement-Action coordination, completed Action submission, and restart recovery
 - `WorkflowStore`, `MemoryWorkflowStore` — durable-store contract and in-memory reference (no database dependency)
+- `ResultDisclosureMap` — optional complete local allow/deny result safeguard for one bridge tool surface
 
 A proposer bridge is dedicated to one MCP client or agent identity and holds
 one private key for one proposer DID. Independent clients require independent
 bridge instances, keys, DIDs, and workflow authorization contexts.
+
+Generated bridges pass a complete reviewed `resultDisclosure` map. Direct SDK
+consumers may opt in with the same local safeguard:
+
+```typescript
+const bridge = new ProposerBridge({
+  // existing tools, package builder, store, endpoints, proposer, and retention
+  resultDisclosure: {
+    ordinary_tool: "allow",
+    secret_tool: "deny",
+  },
+  // ...
+});
+```
+
+When supplied, the map must have exactly one own `allow` or `deny` property for
+every bridge tool. A denied call becomes a local terminal workflow before
+Action construction or forwarding. Tasks and compatibility reads return the
+fixed `RESULT_DISCLOSURE_DENIED` error, including for old stored records. The
+stored historical response or receipt is left unchanged. Omitting this option
+preserves the prior direct-SDK behavior.
 
 ### Bridge Generation
 

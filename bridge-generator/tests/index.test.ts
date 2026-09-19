@@ -1,4 +1,4 @@
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,10 +11,23 @@ describe("low-level bridge generation", () => {
   it("writes a sibling tools.json next to the generated runtime", async () => {
     const outDir = await mkdtemp(join(tmpdir(), "bridge-gen-low-level-"));
     const bridgePath = join(outDir, "bridge.ts");
+    const policyPath = join(outDir, "reviewed-policy.json");
+    const policyText = `${JSON.stringify({
+      version: "1",
+      type: "MpasResultDisclosurePolicy",
+      operations: {
+        create_issue: { credentialBearing: false, resultDisclosure: "allow" },
+        delete_branch: { credentialBearing: true, resultDisclosure: "deny" },
+        merge_pull_request: { credentialBearing: false, resultDisclosure: "allow" },
+      },
+    }, null, 2)}\n`;
+    await writeFile(policyPath, policyText);
 
     await run([
       "--output-bridge",
       bridgePath,
+      "--result-disclosure",
+      policyPath,
       "--",
       "node",
       mockServer,
@@ -25,6 +38,7 @@ describe("low-level bridge generation", () => {
     expect(source).toContain('new URL("./tools.json", import.meta.url)');
     expect(source).not.toContain('"name": "create_issue"');
     expect(tools.map((tool) => tool.name)).toEqual(["create_issue", "delete_branch", "merge_pull_request"]);
+    expect(await readFile(join(outDir, "result-disclosure.json"), "utf8")).toBe(policyText);
   });
 });
 

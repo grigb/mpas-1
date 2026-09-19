@@ -11,6 +11,14 @@ const root = fileURLToPath(new URL("../../", import.meta.url));
 it("builds a generated bridge against the candidate SDK and signs P-256 Action and relay requests", async () => {
   const outDir = await mkdtemp(join(tmpdir(), "mpas-generated-es256-"));
   try {
+    // Supply the required reviewed result-disclosure policy for the discovered tool.
+    const appDir = join(outDir, "suite-probe");
+    await mkdir(appDir, { recursive: true });
+    await writeFile(join(appDir, "result-disclosure.json"), JSON.stringify({
+      version: "1",
+      type: "MpasResultDisclosurePolicy",
+      operations: { echo: { credentialBearing: false, resultDisclosure: "allow" } },
+    }, null, 2), "utf8");
     await runGenerate({
       appName: "suite-probe", outDir, upstreamCommand: "fixture", upstreamArgs: [],
       applicationDid: "did:web:suite-probe.example", log: () => {},

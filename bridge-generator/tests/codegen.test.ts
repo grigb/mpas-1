@@ -3,6 +3,7 @@ import ts from "typescript";
 import { generateBridge, generateToolsJson, generateWorkflowStore } from "../src/bridge-codegen.js";
 import { generatePlugin, inferImpact } from "../src/plugin-codegen.js";
 import type { UpstreamInfo } from "../src/types.js";
+import type { ResultDisclosureMap } from "../src/result-disclosure.js";
 
 const upstream: UpstreamInfo = {
   command: "node",
@@ -26,10 +27,11 @@ const upstream: UpstreamInfo = {
     },
   ],
 };
+const disclosure = Object.freeze({ delete_branch: "deny", list_repositories: "allow" }) satisfies ResultDisclosureMap;
 
 describe("generateBridge", () => {
   it("loads tool definitions from a sibling tools.json", () => {
-    const source = generateBridge(upstream);
+    const source = generateBridge(upstream, disclosure);
     expect(source).toContain('new URL("./tools.json", import.meta.url)');
     expect(source).toContain("const TOOLS = loadTools();");
     expect(source).not.toContain('"name": "delete_branch"');
@@ -37,9 +39,11 @@ describe("generateBridge", () => {
   });
 
   it("wires the shared official Tasks runtime around the tool definitions", () => {
-    const source = generateBridge(upstream);
+    const source = generateBridge(upstream, disclosure);
     // The spec-compliance surface comes from the SDK, not inline logic.
     expect(source).toContain("ProposerBridge");
+    expect(source).toContain("resultDisclosure: RESULT_DISCLOSURE");
+    expect(source).toContain('[["delete_branch","deny"],["list_repositories","allow"]]');
     expect(source).toContain("MpasProtocolServer");
     expect(source).toContain("mcp_protocol_mode_selected");
     expect(source).not.toContain("clientInfo.name");
@@ -65,7 +69,7 @@ describe("generateBridge", () => {
   });
 
   it("returns control without a synchronous approval wait", () => {
-    const source = generateBridge(upstream);
+    const source = generateBridge(upstream, disclosure);
     expect(source).not.toContain("waitForCoordinatedResult");
     expect(source).not.toContain("approvalTimeoutMs ?? 300_000");
     // Legacy blocking-wait config is accepted but ignored, with a warning.
@@ -103,11 +107,11 @@ describe("generateBridge", () => {
   });
 
   it("is deterministic: same input produces byte-identical output", () => {
-    expect(generateBridge(upstream)).toBe(generateBridge(upstream));
+    expect(generateBridge(upstream, disclosure)).toBe(generateBridge(upstream, disclosure));
   });
 
   it("emits syntactically valid TypeScript", () => {
-    const source = generateBridge(upstream);
+    const source = generateBridge(upstream, disclosure);
     const result = ts.transpileModule(source, {
       compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
       reportDiagnostics: true,
@@ -127,7 +131,7 @@ describe("generateBridge", () => {
         },
       ],
     };
-    const source = generateBridge(hostile);
+    const source = generateBridge(hostile, { "tool_*/_breakout": "deny" });
     expect(JSON.parse(generateToolsJson(hostile.tools))).toEqual(hostile.tools);
     const result = ts.transpileModule(source, {
       compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },

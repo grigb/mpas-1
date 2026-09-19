@@ -39,6 +39,7 @@ node dist/index.js generate \
   --app my-app \
   --out ../../mpas-applications/applications \
   --application-did did:web:my-app.example \
+  --result-disclosure ./reviewed-result-disclosure.json \
   [--prompt-secret UPSTREAM_API_TOKEN] \
   [--org-config ./my-org.json] \
   -- /path/to/upstream-mcp-server
@@ -53,6 +54,7 @@ applications/my-app/
   plugin.json                     MpasApplicationPlugin — THE governed set; edit this (membership, DIDs, impacts)
   registry-entry.json             Application Registry draft (PLACEHOLDERs unless --org-config given)
   harness-config.json             Input for the compat/approval harnesses
+  result-disclosure.json          Verbatim reviewed result-disclosure decision for every discovered tool
   build-artifacts/                Advisory/debug artifacts — not governance controls
     tools-list.snapshot.json      Verbatim tool surface + toolSurface hash (regen uses it to remember your removals)
     metadata.json                 Server info, protocol version, capture timestamp
@@ -84,23 +86,45 @@ applications/my-app/
 node dist/index.js \
   --output-bridge ./my-app-bridge.ts \
   --output-plugin ./my-app-plugin.json \
+  --result-disclosure ./reviewed-result-disclosure.json \
   [--prompt-secret UPSTREAM_API_TOKEN] \
   -- /path/to/upstream-mcp-server
 ```
 
-Low-level mode writes `tools.json` beside the `--output-bridge` file. Keep the two files together; the generated runtime loads its tool surface from that sibling file.
+Low-level mode writes `tools.json` and the verbatim reviewed
+`result-disclosure.json` beside the `--output-bridge` file. Keep the generated
+runtime and `tools.json` together.
 
 ## The review workflow (do this before publishing anything)
 
-`plugin.json` is the source of truth for governance: an operation is governed iff it appears in the plugin's `operations` (per the MPAS Application Plugin profile). Everything under `build-artifacts/` is advisory — inputs to *your* judgment, not controls the generator or harnesses enforce.
+`plugin.json` is the source of truth for governance: an operation is governed iff it appears in the plugin's `operations` (per the MPAS Application Plugin profile). Everything under `build-artifacts/` is advisory — inputs to *your* judgment, not controls the generator or harnesses enforce. Result disclosure is a separate, mandatory review for every discovered tool, including pass-through tools.
 
-1. **`plugin.json`** — this is the file you edit.
+1. **`result-disclosure.json`** — supply this reviewed input before the first successful generation. It has this closed form:
+
+   ```json
+   {
+     "version": "1",
+     "type": "MpasResultDisclosurePolicy",
+     "operations": {
+       "ordinary_tool": { "credentialBearing": false, "resultDisclosure": "allow" },
+       "secret_tool": { "credentialBearing": true, "resultDisclosure": "deny" }
+     }
+   }
+   ```
+
+   Include exactly one entry for every discovered upstream tool. A
+   credential-bearing operation must use `deny`; an ordinary operation may
+   also use `deny`. The generator does not infer this decision from a name,
+   impact, annotation, plugin membership, or deployment policy. Missing,
+   unknown, duplicate, or invalid entries stop generation before the output
+   tree changes.
+2. **`plugin.json`** — this is the file you edit.
    - **Membership:** delete any operation that should route as pass-through instead of being governed. Regeneration remembers your removals (see below) and won't re-add them.
    - **Impacts:** each operation's `impact` starts from upstream MCP metadata when available (`annotations.destructiveHint: true` → critical), then falls back to a name-based heuristic (`delete|remove|destroy|drop|purge` → critical, `merge|deploy|release|transfer|revoke` → high, everything else medium). Annotations are untrusted hints, so generated classifications remain drafts and `destructiveHint: false` never downgrades a name-based warning. Fix wrong values; your edits survive regeneration. Consult `build-artifacts/classification.json` for the rationale per tool.
    - **Identity:** replace the `did:web:PLACEHOLDER` values (pluginDid, publisherDid, applicationDid) with real DIDs, and fill `credentialRequirements`. These also survive regeneration.
-2. **`registry-entry.json`** — replace PLACEHOLDERs (or use `--org-config`), set `plugin.repository` to where the plugin will actually be published, then submit as a PR to `oma3/mpas/application-registry/{application}-{org}.json`. The entry already pins `plugin.artifactDid` and `upstream.toolSurface` for you.
-3. **`harness-config.json`** — if you intentionally rename tools, wrap schemas, or edit descriptions in the bridge, record it under `intentionalDeviations` so the compat harness allowlists it. Every tool you reference must exist in the snapshot.
-4. Log your decisions in `CHANGELOG.md`.
+3. **`registry-entry.json`** — replace PLACEHOLDERs (or use `--org-config`), set `plugin.repository` to where the plugin will actually be published, then submit as a PR to `oma3/mpas/application-registry/{application}-{org}.json`. The entry already pins `plugin.artifactDid` and `upstream.toolSurface` for you.
+4. **`harness-config.json`** — if you intentionally rename tools, wrap schemas, or edit descriptions in the bridge, record it under `intentionalDeviations` so the compat harness allowlists it. Every tool you reference must exist in the snapshot.
+5. Log your decisions in `CHANGELOG.md`.
 
 ### Example prompt for reviewing plugin membership
 
@@ -166,6 +190,7 @@ Re-running `generate` over an existing folder is safe and diff-friendly:
 - **`plugin.json` is merged, and your membership edits stick.** The previous snapshot minus the previous plugin is remembered as intentional pass-through: a tool you deleted from the plugin is not re-added on regen. Genuinely new upstream tools (absent from the previous snapshot) *are* added as governed candidates so they can't slip in unnoticed — delete them if they shouldn't be governed. Tools the upstream dropped disappear. DIDs, `credentialRequirements`, and per-operation `impact` values are preserved from your existing plugin; operation descriptions and payload schemas refresh from discovery. (You do **not** need to list `plugin.json` in `.generator-keep` — doing so would also block new-tool surfacing; remove it if you added it under older generator versions.)
 - `classification.json` is merged: your reviewed entries survive verbatim, new upstream tools are added as `name-heuristic` drafts (re-flagging `draft: true`), removed tools are dropped. It never drives plugin membership.
 - `harness-config.json` is merged: the upstream command is refreshed, your `intentionalDeviations` and `env` survive.
+- `result-disclosure.json` is reused when `--result-disclosure` is omitted on regeneration. Discovery is validated against the complete existing review before any generated file is replaced. A newly discovered tool therefore requires a new reviewed input. The generated bridge embeds the validated map; editing the sidecar alone does not change an already generated runtime.
 
 ## Building a generated bridge
 
@@ -228,7 +253,7 @@ Keys come from the demo CLI (`mpas key generate`, which mints did:jwk identities
 - **Verbatim capture.** Complete MCP Tool objects are copied exactly — including output schemas, annotations, icons, `_meta`, and extension fields — never summarized or renamed. Paginated `tools/list` responses are collected into one static surface. Disambiguation between applications is the job of `target.applicationDid`, never tool-name prefixes.
 - **Mirror responses.** Successful upstream MCP `CallToolResult` objects returned by the adapter are relayed without reshaping, preserving structured content, resource content, `_meta`, and future fields.
 - **Injection-safe codegen.** Hostile tool names/descriptions cannot break out of the generated code (tested).
-- **Exit codes:** `0` success · `2` upstream spawn failure · `3` MCP handshake failure · `4` tools/list failure (including zero tools or malformed tool definitions) · `5` generate-phase validation error (bad `--app` name, bad org config, incomplete registry entry). Progress goes to stderr.
+- **Exit codes:** `0` success · `2` upstream spawn failure · `3` MCP handshake failure · `4` tools/list failure (including zero tools or malformed tool definitions) · `5` generate-phase validation error (bad `--app` name, bad org config, incomplete registry entry, or invalid result-disclosure review). Progress goes to stderr.
 
 ## What this tool does not do
 

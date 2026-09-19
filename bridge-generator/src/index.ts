@@ -7,10 +7,12 @@ import { discoverUpstream } from "./discovery.js";
 import { runGenerate } from "./generate.js";
 import { generatePlugin } from "./plugin-codegen.js";
 import { applyPromptSecrets } from "./prompt-secret.js";
+import { loadResultDisclosurePolicy } from "./result-disclosure.js";
 
 interface CliArgs {
   outputBridge: string;
   outputPlugin?: string;
+  resultDisclosurePath?: string;
   promptSecrets: string[];
   upstreamCommand: string;
   upstreamArgs: string[];
@@ -21,6 +23,7 @@ interface GenerateCliArgs {
   outDir: string;
   orgConfigPath?: string;
   applicationDid?: string;
+  resultDisclosurePath?: string;
   promptSecrets: string[];
   upstreamCommand: string;
   upstreamArgs: string[];
@@ -37,12 +40,20 @@ export async function run(argv = process.argv.slice(2)): Promise<void> {
   const args = parseArgs(argv);
   await applyPromptSecrets(args.promptSecrets);
   const upstream = await discoverUpstream(args.upstreamCommand, args.upstreamArgs);
+  const resultDisclosurePath = args.resultDisclosurePath ?? join(dirname(args.outputBridge), "result-disclosure.json");
+  const disclosure = await loadResultDisclosurePolicy(
+    resultDisclosurePath,
+    upstream.tools.map((tool) => tool.name),
+  );
 
-  await writeOutput(args.outputBridge, generateBridge(upstream));
+  await writeOutput(args.outputBridge, generateBridge(upstream, disclosure.disclosureMap));
   const outputTools = join(dirname(args.outputBridge), "tools.json");
   await writeOutput(outputTools, generateToolsJson(upstream.tools));
+  const outputDisclosure = join(dirname(args.outputBridge), "result-disclosure.json");
+  await writeOutput(outputDisclosure, disclosure.rawText);
   process.stderr.write(`Bridge written to: ${args.outputBridge}\n`);
   process.stderr.write(`Tools written to: ${outputTools}\n`);
+  process.stderr.write(`Result disclosure policy written to: ${outputDisclosure}\n`);
 
   if (args.outputPlugin) {
     await writeOutput(args.outputPlugin, generatePlugin(upstream.tools, upstream.protocolVersion));
@@ -55,6 +66,7 @@ function parseGenerateArgs(argv: string[]): GenerateCliArgs {
   let outDir: string | undefined;
   let orgConfigPath: string | undefined;
   let applicationDid: string | undefined;
+  let resultDisclosurePath: string | undefined;
   const promptSecrets: string[] = [];
   let delimiterIndex = -1;
 
@@ -78,6 +90,10 @@ function parseGenerateArgs(argv: string[]): GenerateCliArgs {
     }
     if (arg === "--application-did") {
       applicationDid = argv[++index];
+      continue;
+    }
+    if (arg === "--result-disclosure") {
+      resultDisclosurePath = argv[++index];
       continue;
     }
     if (arg === "--prompt-secret") {
@@ -106,6 +122,7 @@ function parseGenerateArgs(argv: string[]): GenerateCliArgs {
     outDir: resolve(outDir),
     ...(orgConfigPath ? { orgConfigPath: resolve(orgConfigPath) } : {}),
     ...(applicationDid ? { applicationDid } : {}),
+    ...(resultDisclosurePath ? { resultDisclosurePath: resolve(resultDisclosurePath) } : {}),
     promptSecrets,
     upstreamCommand: argv[delimiterIndex + 1],
     upstreamArgs: argv.slice(delimiterIndex + 2),
@@ -115,6 +132,7 @@ function parseGenerateArgs(argv: string[]): GenerateCliArgs {
 function parseArgs(argv: string[]): CliArgs {
   let outputBridge: string | undefined;
   let outputPlugin: string | undefined;
+  let resultDisclosurePath: string | undefined;
   const promptSecrets: string[] = [];
   let delimiterIndex = -1;
 
@@ -130,6 +148,10 @@ function parseArgs(argv: string[]): CliArgs {
     }
     if (arg === "--output-plugin") {
       outputPlugin = argv[++index];
+      continue;
+    }
+    if (arg === "--result-disclosure") {
+      resultDisclosurePath = argv[++index];
       continue;
     }
     if (arg === "--prompt-secret") {
@@ -153,6 +175,7 @@ function parseArgs(argv: string[]): CliArgs {
   return {
     outputBridge: resolve(outputBridge),
     ...(outputPlugin ? { outputPlugin: resolve(outputPlugin) } : {}),
+    ...(resultDisclosurePath ? { resultDisclosurePath: resolve(resultDisclosurePath) } : {}),
     promptSecrets,
     upstreamCommand: argv[delimiterIndex + 1],
     upstreamArgs: argv.slice(delimiterIndex + 2),
@@ -168,8 +191,8 @@ function usage(message: string): Error {
   return new Error(`${message}
 
 Usage:
-  bridge-generator [--prompt-secret <ENV_VAR>]... --output-bridge <path> [--output-plugin <path>] -- <upstream-command> [upstream-args...]
-  bridge-generator generate --app <name> --out <dir> [--org-config <path>] [--application-did <did>] [--prompt-secret <ENV_VAR>]... -- <upstream-command> [upstream-args...]
+  bridge-generator [--prompt-secret <ENV_VAR>]... --output-bridge <path> [--output-plugin <path>] [--result-disclosure <path>] -- <upstream-command> [upstream-args...]
+  bridge-generator generate --app <name> --out <dir> [--org-config <path>] [--application-did <did>] [--result-disclosure <path>] [--prompt-secret <ENV_VAR>]... -- <upstream-command> [upstream-args...]
 
   --prompt-secret <ENV_VAR>  If ENV_VAR is unset, prompt on the TTY with echo disabled
                              (like an SSH passphrase) and export it for the upstream spawn.

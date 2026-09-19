@@ -21,6 +21,13 @@ import {
   type WorkflowRecord,
   type WorkflowStore,
 } from "./workflow-store.js";
+import {
+  RESULT_DISCLOSURE_DENIED_CODE,
+  RESULT_DISCLOSURE_DENIED_MESSAGE,
+  resultDisclosureAllows,
+  validateResultDisclosureMap,
+  type ResultDisclosureMap,
+} from "./result-disclosure.js";
 
 /**
  * Proposer-bridge workflow engine (feature spec §6 bridge track).
@@ -92,6 +99,8 @@ export interface BridgeWorkflowEngineOptions {
   /** Constructs A2 (or a later replacement) after Verifier policy feedback. */
   buildCoordinationReplacement: BuildCoordinationReplacement;
   proposerDid: Did;
+  /** Optional local result-disclosure map copied and validated at construction. */
+  resultDisclosure?: ResultDisclosureMap;
   /** Distinguishes workers contending for the same store. */
   workerId?: string;
   /**
@@ -159,6 +168,7 @@ export class BridgeWorkflowEngine {
   private readonly policyUnavailableInitialRetryMs: number;
   private readonly policyUnavailableMaxRetryMs: number;
   private readonly now: () => number;
+  private readonly resultDisclosure?: ResultDisclosureMap;
   private readonly waiters = new Map<string, Set<(record: WorkflowRecord) => void>>();
   /**
    * Per-Task outbound lanes. Each Task ID serializes that Task's initial,
@@ -198,6 +208,9 @@ export class BridgeWorkflowEngine {
     }
     this.buildCoordinationReplacement = options.buildCoordinationReplacement;
     this.proposerDid = options.proposerDid;
+    this.resultDisclosure = options.resultDisclosure === undefined
+      ? undefined
+      : validateResultDisclosureMap(options.resultDisclosure);
     this.workerId = options.workerId ?? `worker-${process.pid}`;
     const submissionTimeoutMs = options.submissionTimeoutMs ?? DEFAULT_SUBMISSION_TIMEOUT_MS;
     this.claimLeaseMs = options.claimLeaseMs ?? DEFAULT_CLAIM_LEASE_MS;
@@ -234,6 +247,9 @@ export class BridgeWorkflowEngine {
       throw new Error("Task ID and Action ID must be distinct.");
     }
     const record = this.store.createWorkflow(input);
+    if (this.resolveDisclosureDenied(record)) {
+      return { kind: "deferred", record: this.mustGet(record.taskId) };
+    }
     return this.dispatchOutbound(record.taskId, async () => {
       const current = this.mustGet(record.taskId);
       if (current.state !== "created") {
@@ -253,12 +269,15 @@ export class BridgeWorkflowEngine {
    * is still in flight.
    */
   async pollOnce(): Promise<void> {
+    this.resolveRecoverableDisclosureDenials();
     const expiry = this.sweepExpired();
 
-    const hasCoordinationWork = this.store
+    const shouldPollCoordination = this.store
       .listRecoverableWorkflows()
-      .some((record) => record.state === "awaitingApprovals");
-    if (hasCoordinationWork) {
+      .some((record) =>
+        record.state === "awaitingApprovals" &&
+        (this.resultDisclosure === undefined || resultDisclosureAllows(this.resultDisclosure, record.toolName)));
+    if (shouldPollCoordination) {
       try {
         const poll = await this.coordinationService.pollWork();
         for (const update of poll.actionUpdates) {
@@ -291,6 +310,9 @@ export class BridgeWorkflowEngine {
     if (isTerminal(record)) {
       return record;
     }
+    if (this.resolveDisclosureDenied(record)) {
+      return this.mustGet(taskId);
+    }
 
     const coordinationStarted = record.coordinationRef !== undefined;
     if (!this.store.cancelWorkflow(taskId)) {
@@ -312,6 +334,7 @@ export class BridgeWorkflowEngine {
 
   /** Startup reconciliation (feature spec §9.4). Idempotent. */
   async reconcile(): Promise<void> {
+    this.resolveRecoverableDisclosureDenials();
     await this.sweepExpired();
     await this.advanceClaimable();
   }
@@ -353,6 +376,9 @@ export class BridgeWorkflowEngine {
     const current = this.store.getWorkflow(record.taskId);
     if (!current || proposerDidOf(current) !== this.proposerDid || isTerminal(current) || current.state !== "created") {
       return this.resultFromRecord(current ?? record);
+    }
+    if (this.resolveDisclosureDenied(current)) {
+      return { kind: "deferred", record: this.mustGet(record.taskId) };
     }
     if (!this.holdClaim(current.taskId)) {
       return this.resultFromRecord(this.mustGet(current.taskId));
@@ -456,6 +482,9 @@ export class BridgeWorkflowEngine {
   }
 
   private async submitToCoordination(record: WorkflowRecord): Promise<ProposeResult> {
+    if (this.resolveDisclosureDenied(record)) {
+      return { kind: "deferred", record: this.mustGet(record.taskId) };
+    }
     if (!this.holdClaim(record.taskId)) {
       return this.resultFromRecord(this.mustGet(record.taskId));
     }
@@ -493,6 +522,9 @@ export class BridgeWorkflowEngine {
     const actionId = update.actionRef.actionId.value;
     const record = this.store.getWorkflowByActionId(actionId);
     if (!record || proposerDidOf(record) !== this.proposerDid || isTerminal(record)) {
+      return;
+    }
+    if (this.resolveDisclosureDenied(record)) {
       return;
     }
 
@@ -584,6 +616,9 @@ export class BridgeWorkflowEngine {
       if (!this.store.claimWorkflow(current.taskId, this.workerId, this.claimLeaseMs)) {
         return;
       }
+      if (this.resolveDisclosureDenied(this.mustGet(current.taskId))) {
+        return;
+      }
       const claimed = this.mustGet(current.taskId);
       switch (claimed.state) {
         case "created":
@@ -626,6 +661,9 @@ export class BridgeWorkflowEngine {
   private async submitCompleted(record: WorkflowRecord): Promise<void> {
     const current = this.store.getWorkflow(record.taskId);
     if (!current || proposerDidOf(current) !== this.proposerDid || isTerminal(current)) {
+      return;
+    }
+    if (this.resolveDisclosureDenied(current)) {
       return;
     }
     if (!this.holdClaim(current.taskId)) {
@@ -770,6 +808,9 @@ export class BridgeWorkflowEngine {
   }
 
   private async retryPolicyUnavailable(record: WorkflowRecord): Promise<void> {
+    if (this.resolveDisclosureDenied(record)) {
+      return;
+    }
     if (!this.policyUnavailableRetryIsDue(record)) {
       return;
     }
@@ -800,6 +841,28 @@ export class BridgeWorkflowEngine {
   private resolveUnresolvable(taskId: string, errorCode: string, errorMessage: string): void {
     this.store.resolveWorkflow(taskId, { kind: "unresolvable", errorCode, errorMessage });
     this.notify(this.mustGet(taskId));
+  }
+
+  private resolveDisclosureDenied(record: WorkflowRecord): boolean {
+    if (resultDisclosureAllows(this.resultDisclosure, record.toolName)) {
+      return false;
+    }
+    if (!isTerminal(record)) {
+      this.resolveUnresolvable(
+        record.taskId,
+        RESULT_DISCLOSURE_DENIED_CODE,
+        RESULT_DISCLOSURE_DENIED_MESSAGE,
+      );
+    }
+    return true;
+  }
+
+  private resolveRecoverableDisclosureDenials(): void {
+    for (const record of this.store.listRecoverableWorkflows()) {
+      if (proposerDidOf(record) === this.proposerDid) {
+        this.resolveDisclosureDenied(record);
+      }
+    }
   }
 
   /**

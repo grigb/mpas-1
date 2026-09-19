@@ -1,6 +1,12 @@
 import type { ActionResponse } from "../types/mpas.js";
 import type { BridgeUpstreamTool } from "./bridge-runtime.js";
 import type { WorkflowRecord } from "./workflow-store.js";
+import {
+  RESULT_DISCLOSURE_DENIED_CODE,
+  RESULT_DISCLOSURE_DENIED_MESSAGE,
+  resultDisclosureAllows,
+  type ResultDisclosureMap,
+} from "./result-disclosure.js";
 
 /** Temporary MCP compatibility surface for clients without MCP Tasks. */
 
@@ -32,12 +38,20 @@ export interface CompatibilityResultOptions {
   resultRetentionSeconds: number;
   notificationAssignedElsewhere?: boolean;
   now?: () => number;
+  resultDisclosure?: ResultDisclosureMap;
 }
 
 export function compatibilityResultForRecord(
   record: WorkflowRecord,
   options: CompatibilityResultOptions,
 ): CompatibilityToolResult {
+  if (!resultDisclosureAllows(options.resultDisclosure, record.toolName)) {
+    return buildCompatibilityError(
+      RESULT_DISCLOSURE_DENIED_CODE,
+      RESULT_DISCLOSURE_DENIED_MESSAGE,
+      false,
+    );
+  }
   if (record.state === "cancelled") {
     return buildCompatibilityError("ACTION_CANCELLED", "The MPAS Action was cancelled.", false);
   }

@@ -1,7 +1,8 @@
 import type { McpToolDefinition, UpstreamInfo } from "./types.js";
+import type { ResultDisclosureMap } from "./result-disclosure.js";
 
 /** Emits a production proposer bridge with Tasks-first MCP protocol detection. */
-export function generateBridge(info: UpstreamInfo): string {
+export function generateBridge(info: UpstreamInfo, resultDisclosure: ResultDisclosureMap): string {
   const upstream = [info.command, ...info.args].join(" ");
   const serverName = `${info.serverName}-mpas-bridge`;
   const serverVersion = info.serverVersion ?? "1.0.0";
@@ -47,6 +48,9 @@ import type {
 import { SqliteWorkflowStore } from "./sqlite-workflow-store.js";
 
 const TOOLS = loadTools();
+const RESULT_DISCLOSURE = Object.freeze(Object.fromEntries(${JSON.stringify(Object.entries(resultDisclosure))})) as Readonly<
+  Record<string, "allow" | "deny">
+>;
 
 interface WorkflowConfig {
   /** SQLite database path. Omitted → in-memory store (no restart durability). */
@@ -167,6 +171,7 @@ export class GeneratedBridge {
       });
       return new ProposerBridge({
         tools: [...TOOLS],
+        resultDisclosure: RESULT_DISCLOSURE,
         buildActionPackage: (toolName, args) => actionPackageBuilder.buildFromToolCall(toolName, args),
         buildCoordinationReplacement: (priorPackage, verifierRequirements) =>
           actionPackageBuilder.buildCoordinationReplacement(priorPackage, verifierRequirements),

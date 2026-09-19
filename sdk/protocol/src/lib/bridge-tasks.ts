@@ -10,10 +10,17 @@ import {
 } from "./mcp-tasks-extension.js";
 import { buildMpasTaskMeta } from "./mpas-task-meta.js";
 import { TERMINAL_WORKFLOW_STATES, type WorkflowRecord } from "./workflow-store.js";
+import {
+  RESULT_DISCLOSURE_DENIED_CODE,
+  RESULT_DISCLOSURE_DENIED_MESSAGE,
+  resultDisclosureAllows,
+  type ResultDisclosureMap,
+} from "./result-disclosure.js";
 
 export interface TaskResultConfig {
   resultRetentionSeconds: number;
   taskPollIntervalMs?: number;
+  resultDisclosure?: ResultDisclosureMap;
 }
 
 export function buildCreateTaskResult(record: WorkflowRecord, config: TaskResultConfig): CreateTaskResult {
@@ -30,6 +37,9 @@ export function buildCompleteToolCallResult(record: WorkflowRecord): CompleteToo
 
 export function buildGetTaskResult(record: WorkflowRecord, config: TaskResultConfig): GetTaskResult {
   const task = taskSummary(record, config);
+  if (!resultDisclosureAllows(config.resultDisclosure, record.toolName)) {
+    return { resultType: "complete", ...task, status: "completed", result: disclosureDeniedResult() };
+  }
   if (record.state === "cancelled") {
     return { resultType: "complete", ...task, status: "cancelled" };
   }
@@ -51,6 +61,18 @@ export function buildCancelTaskResult(): CancelTaskResult {
 }
 
 function taskSummary(record: WorkflowRecord, config: TaskResultConfig): Task {
+  const disclosureDenied = !resultDisclosureAllows(config.resultDisclosure, record.toolName);
+  if (disclosureDenied) {
+    return {
+      taskId: record.taskId,
+      status: "completed",
+      statusMessage: RESULT_DISCLOSURE_DENIED_MESSAGE,
+      createdAt: record.createdAt,
+      lastUpdatedAt: record.updatedAt,
+      ttlMs: ttlMs(record, config.resultRetentionSeconds),
+      pollIntervalMs: config.taskPollIntervalMs ?? 5_000,
+    };
+  }
   const status = TERMINAL_WORKFLOW_STATES.has(record.state)
     ? record.state === "cancelled"
       ? "cancelled"
@@ -65,6 +87,19 @@ function taskSummary(record: WorkflowRecord, config: TaskResultConfig): Task {
     ttlMs: ttlMs(record, config.resultRetentionSeconds),
     pollIntervalMs: config.taskPollIntervalMs ?? 5_000,
     ...(status === "working" ? { _meta: { [MPAS_MCP_PROFILE_EXTENSION_ID]: buildMpasTaskMeta(record) } } : {}),
+  };
+}
+
+function disclosureDeniedResult(): Record<string, unknown> {
+  return {
+    content: [{ type: "text", text: RESULT_DISCLOSURE_DENIED_MESSAGE }],
+    structuredContent: {
+      version: "1",
+      type: "MpasTaskError",
+      code: RESULT_DISCLOSURE_DENIED_CODE,
+      message: RESULT_DISCLOSURE_DENIED_MESSAGE,
+    },
+    isError: true,
   };
 }
 

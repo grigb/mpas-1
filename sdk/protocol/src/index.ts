@@ -36,6 +36,7 @@ export * from "./lib/bridge-compatibility.js";
 export * from "./lib/workflow-store.js";
 export * from "./lib/workflow-engine.js";
 export * from "./lib/bridge-runtime.js";
+export * from "./lib/result-disclosure.js";
 export * from "./lib/mcp-payload.js";
 export {
   evaluatePolicy,

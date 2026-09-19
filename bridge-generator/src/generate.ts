@@ -31,6 +31,7 @@ import {
 import { generateBridge, generateToolsJson, generateWorkflowStore } from "./bridge-codegen.js";
 import { generatePlugin } from "./plugin-codegen.js";
 import { discoverUpstream } from "./discovery.js";
+import { loadResultDisclosurePolicy } from "./result-disclosure.js";
 import type { CredentialRequirement, GeneratedPlugin, McpToolDefinition, UpstreamInfo } from "./types.js";
 
 export const GENERATOR_VERSION = "0.2.0";
@@ -55,6 +56,8 @@ export interface GenerateOptions {
   outDir: string;
   orgConfigPath?: string;
   applicationDid?: string;
+  /** Reviewed result-disclosure policy. Defaults to the application output directory. */
+  resultDisclosurePath?: string;
   upstreamCommand: string;
   upstreamArgs: string[];
   /** Injectable for deterministic tests. */
@@ -81,6 +84,8 @@ export async function runGenerate(options: GenerateOptions): Promise<void> {
   const upstream = await discover(options.upstreamCommand, options.upstreamArgs);
 
   const appDir = resolve(options.outDir, options.appName);
+  const disclosurePath = options.resultDisclosurePath ?? join(appDir, "result-disclosure.json");
+  const disclosure = await loadResultDisclosurePolicy(disclosurePath, upstream.tools.map((tool) => tool.name));
   await mkdir(join(appDir, "build-artifacts"), { recursive: true });
   await mkdir(join(appDir, "bridge", "src"), { recursive: true });
 
@@ -95,6 +100,11 @@ export async function runGenerate(options: GenerateOptions): Promise<void> {
     await writeFile(path, contents, "utf8");
     log(`Wrote: ${relativePath}`);
   };
+
+  // The reviewed source bytes are copied exactly. The validated in-memory map,
+  // rather than this sidecar at runtime, is embedded into the generated bridge.
+  await writeFile(join(appDir, "result-disclosure.json"), disclosure.rawText, "utf8");
+  log("Wrote: result-disclosure.json");
 
   // Prior state must be read before the generated surface is overwritten:
   // regeneration membership is derived from old snapshot − old plugin.
@@ -158,7 +168,7 @@ export async function runGenerate(options: GenerateOptions): Promise<void> {
   await writeGenerated("registry-entry.json", jsonFile(registryEntry));
 
   // --- bridge/ ---
-  await writeGenerated("bridge/src/index.ts", generateBridge(upstream));
+  await writeGenerated("bridge/src/index.ts", generateBridge(upstream, disclosure.disclosureMap));
   await writeGenerated("bridge/src/tools.json", generateToolsJson(upstream.tools));
   await writeGenerated("bridge/src/sqlite-workflow-store.ts", generateWorkflowStore());
   await writeGenerated("bridge/package.json", jsonFile(bridgePackageJson(options.appName)));

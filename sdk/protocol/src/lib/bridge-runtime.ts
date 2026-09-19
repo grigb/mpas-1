@@ -36,6 +36,13 @@ import {
   type ProposeResult,
 } from "./workflow-engine.js";
 import type { WorkflowRecord, WorkflowStore } from "./workflow-store.js";
+import {
+  RESULT_DISCLOSURE_DENIED_CODE,
+  RESULT_DISCLOSURE_DENIED_MESSAGE,
+  resultDisclosureAllows,
+  validateResultDisclosureMap,
+  type ResultDisclosureMap,
+} from "./result-disclosure.js";
 
 /** Shared runtime used by generated official MCP Tasks proposer bridges. */
 
@@ -63,6 +70,8 @@ export interface ProposerBridgeOptions {
   coordination?: WorkflowCoordination;
   proposerDid: Did;
   resultRetentionSeconds: number;
+  /** Optional complete local allow/deny map for results from this tool surface. */
+  resultDisclosure?: ResultDisclosureMap;
   /** Background MPAS engine tick interval. Default 2000ms. */
   pollIntervalMs?: number;
   /** Client-facing tasks/get polling hint. Default 5000ms. */
@@ -111,6 +120,9 @@ export class ProposerBridge {
   private readonly compatibilityTools: BridgeUpstreamTool[];
   private readonly maxWaitTimeoutSeconds: number;
   private readonly pollIntervalMs: number;
+  private readonly resultDisclosure?: ResultDisclosureMap;
+  private readonly resultRetentionSeconds: number;
+  private readonly now: () => number;
   private ticker?: ReturnType<typeof setInterval>;
 
   constructor(options: ProposerBridgeOptions) {
@@ -118,9 +130,15 @@ export class ProposerBridge {
     this.buildActionPackage = options.buildActionPackage;
     this.store = options.store;
     this.proposerDid = options.proposerDid;
+    this.resultRetentionSeconds = options.resultRetentionSeconds;
+    this.now = options.now ?? (() => Date.now());
+    this.resultDisclosure = options.resultDisclosure === undefined
+      ? undefined
+      : validateResultDisclosureMap(options.resultDisclosure, this.tools.map((tool) => tool.name));
     this.resultConfig = {
       resultRetentionSeconds: options.resultRetentionSeconds,
       taskPollIntervalMs: options.taskPollIntervalMs ?? 5_000,
+      ...(this.resultDisclosure !== undefined ? { resultDisclosure: this.resultDisclosure } : {}),
     };
     this.compatibilityResultConfig = {
       resultRetentionSeconds: options.resultRetentionSeconds,
@@ -128,6 +146,7 @@ export class ProposerBridge {
         ? { notificationAssignedElsewhere: options.notificationAssignedElsewhere }
         : {}),
       ...(options.now !== undefined ? { now: options.now } : {}),
+      ...(this.resultDisclosure !== undefined ? { resultDisclosure: this.resultDisclosure } : {}),
     };
     this.maxWaitTimeoutSeconds = options.maxWaitTimeoutSeconds ?? 300;
     this.compatibilityTools = buildCompatibilityToolDefinitions(this.tools, {
@@ -146,6 +165,7 @@ export class ProposerBridge {
       submissionTimeoutMs: options.submissionTimeoutMs ?? inferredSubmissionTimeoutMs(options),
       ...(options.claimLeaseMs !== undefined ? { claimLeaseMs: options.claimLeaseMs } : {}),
       ...(options.now !== undefined ? { now: options.now } : {}),
+      ...(this.resultDisclosure !== undefined ? { resultDisclosure: this.resultDisclosure } : {}),
     });
   }
 
@@ -235,6 +255,10 @@ export class ProposerBridge {
       throw new UnknownBridgeToolError(toolName);
     }
 
+    if (!resultDisclosureAllows(this.resultDisclosure, toolName)) {
+      return this.createLocalDisclosureDenial(toolName);
+    }
+
     const actionPackage = await this.buildActionPackage(toolName, args);
     const envelope = actionPackage.actionEnvelope;
     return this.engine.propose({
@@ -248,6 +272,37 @@ export class ProposerBridge {
     });
   }
 
+  private createLocalDisclosureDenial(toolName: string): ProposeResult {
+    const taskId = `urn:uuid:${randomUUID()}`;
+    const actionId = `local-disclosure-denied-${randomUUID()}`;
+    const expiresAt = new Date(this.now() + this.resultRetentionSeconds * 1_000).toISOString();
+    const localEnvelope = {
+      actionId: { value: actionId },
+      proposer: { did: this.proposerDid },
+      expiresAt,
+    };
+    const actionEnvelopeHash = computeJsonHash(localEnvelope);
+    this.store.createWorkflow({
+      taskId,
+      actionId,
+      actionIdempotencyKey: randomUUID(),
+      actionEnvelopeHash: actionEnvelopeHash.value,
+      toolName,
+      actionPackage: {
+        actionEnvelope: localEnvelope,
+        approvalBundle: { actionEnvelopeHash },
+      } as unknown as ActionPackage,
+      expiresAt,
+    });
+    this.store.resolveWorkflow(taskId, {
+      kind: "unresolvable",
+      errorCode: RESULT_DISCLOSURE_DENIED_CODE,
+      errorMessage: RESULT_DISCLOSURE_DENIED_MESSAGE,
+    });
+    const record = this.visibleRecord(taskId);
+    return { kind: "deferred", record };
+  }
+
   private async handleCompatibilityWait(args: object): Promise<CompatibilityToolResult> {
     const input = validateCompatibilityWaitInput(args, {
       maxTimeoutSeconds: this.maxWaitTimeoutSeconds,
@@ -258,6 +313,9 @@ export class ProposerBridge {
 
     try {
       const visible = this.visibleCompatibilityRecord(input.actionId);
+      if (!resultDisclosureAllows(this.resultDisclosure, visible.toolName)) {
+        return compatibilityResultForRecord(visible, this.compatibilityResultConfig);
+      }
       const record = await this.engine.waitForResult(visible.taskId, input.timeoutSeconds * 1_000);
       if (!record || workflowProposerDid(record) !== this.proposerDid) {
         return buildCompatibilityError(
