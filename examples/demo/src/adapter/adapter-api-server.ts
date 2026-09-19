@@ -25,7 +25,7 @@ import {
   verifyActionPackage,
 } from "../core/verification.js";
 import { DispatchLedger } from "./dispatch-ledger.js";
-import type { LoadedDeploymentConfig } from "./config-loader.js";
+import type { LoadedDeploymentConfig, ManagedOAuthConfiguration } from "./config-loader.js";
 import type { FileCredentialProvider } from "./credential-provider.js";
 import { oauthLoginCommand, prepareOAuthForDispatch } from "./oauth-operator.js";
 import { prepareMcpHttp } from "./dispatch/mcp-http.js";
@@ -443,18 +443,32 @@ async function prepareTarget(
   const protocolVersion = loadedConfig.plugin.executionProfile.protocolVersion;
   if (loadedConfig.config.executionTarget.type === "mcp.http") {
     if (loadedConfig.config.executionTarget.auth?.type === "oauth2") {
+      const oauthAuth = loadedConfig.config.executionTarget.auth as ManagedOAuthConfiguration;
       const operatorCommand = oauthLoginCommand({
         applicationDid: loadedConfig.config.target.applicationDid,
         resourceUrl: loadedConfig.config.executionTarget.url,
-        session: loadedConfig.config.executionTarget.auth.session,
+        session: oauthAuth.session,
         credentialHandle: loadedConfig.config.credentialBindings[0].credentialHandle,
       });
       const preparedOAuth = await prepareOAuthForDispatch(
-        loadedConfig.config.executionTarget.auth.session,
+        oauthAuth.session,
         loadedConfig.config.credentialBindings[0].credentialHandle,
         loadedConfig.config.target.applicationDid,
         loadedConfig.config.executionTarget.url,
         credentialDir,
+        {
+          scopes: oauthAuth.scopes,
+          refreshScope: loadedConfig.plugin.credentialRequirements
+            ?.map((requirement: { refreshScope?: string }) => requirement.refreshScope)
+            .find((scope: string | undefined) => typeof scope === "string" && scope.trim().length > 0)
+            ?.trim() ?? "offline_access",
+          issuer: oauthAuth.issuer,
+          client: oauthAuth.client,
+          owner: oauthAuth.owner,
+          sharing: oauthAuth.sharing,
+          refresh: oauthAuth.refresh,
+          ...(credentialDir ? { auditPath: `${credentialDir}/oauth-audit.jsonl` } : {}),
+        },
       );
       if (!preparedOAuth.ok) {
         return { ok: false, error: preparedOAuth.error };

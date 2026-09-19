@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import type { FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
 import { startDaemon } from "../../src/adapter/daemon.js";
-import { dryRunActionFile, runCli } from "../../src/cli/index.js";
+import { dryRunActionFile, runCli, validateConfig } from "../../src/cli/index.js";
 
 const fixturesDir = fileURLToPath(new URL("../fixtures/", import.meta.url));
 const startedApps: FastifyInstance[] = [];
@@ -48,6 +48,58 @@ async function startFixtureDaemon() {
   });
   startedApps.push(daemon.app);
   return daemon;
+}
+
+async function managedOAuthConfigDir() {
+  const configDir = await mkdtemp(join(tmpdir(), "mpas-cli-oauth-config-"));
+  const config = JSON.parse(
+    await readFile(join(fixturesDir, "configs", "github-mirror-adapter-config.json"), "utf8"),
+  ) as Record<string, any>;
+  config.plugin.path = join(fixturesDir, "plugins", "github-mirror-plugin.json");
+  config.credentialBindings = [{ credentialHandle: "managed-session", provider: "file" }];
+  config.executionTarget = {
+    type: "mcp.http",
+    url: "https://mcp.example/mcp",
+    auth: {
+      type: "oauth2",
+      session: "managed-session",
+      scopes: ["mcp:tools"],
+      client: { type: "dynamic" },
+      refresh: { safetyWindowMs: 0, jitterMaxMs: 0 },
+    },
+  };
+  await writeFile(join(configDir, "managed.json"), `${JSON.stringify(config, null, 2)}\n`);
+  return { configDir, config };
+}
+
+function managedOAuthSession(config: Record<string, any>, tokens: Record<string, unknown>, tokensSavedAt: string) {
+  const applicationDid = config.target.applicationDid;
+  const resourceUrl = config.executionTarget.url;
+  const operatorPrincipal = `local-os-user:${typeof process.getuid === "function" ? process.getuid() : "test"}`;
+  return {
+    version: 2,
+    session: "managed-session",
+    credentialHandle: "managed-session",
+    applicationDid,
+    resourceUrl,
+    owner: operatorPrincipal,
+    sharing: { applicationDids: [applicationDid], operatorPrincipals: [operatorPrincipal] },
+    binding: {
+      applicationDid,
+      resourceUrl,
+      issuer: "https://issuer.example",
+      clientMode: "dynamic",
+      clientId: "synthetic-client",
+      clientConfiguration: JSON.stringify({ type: "dynamic" }),
+      scopeConfiguration: JSON.stringify({ scopes: ["mcp:tools"], refreshScope: "offline_access" }),
+      requestedScopes: ["mcp:tools", "offline_access"],
+      redirectUrl: "http://127.0.0.1:49152/oauth/callback",
+    },
+    clientInformation: { client_id: "synthetic-client" },
+    tokens,
+    tokensSavedAt,
+    refreshJitterMs: 0,
+  };
 }
 
 afterEach(async () => {
@@ -156,7 +208,6 @@ describe("CLI daemon and testing commands", () => {
       headers: { "content-type": "application/mpas+json" },
       payload: JSON.stringify({ version: "1", type: "ActionRequest", actionPackage }),
     });
-
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
       type: "ActionResponse",
@@ -189,6 +240,82 @@ describe("CLI daemon and testing commands", () => {
       executionReceipt: {
         type: "ExecutionReceipt",
       },
+    });
+  });
+
+  it.each([
+    {
+      name: "valid",
+      tokens: { access_token: "synthetic", refresh_token: "synthetic-refresh", token_type: "Bearer", expires_in: 3600 },
+      savedAt: (): string => new Date().toISOString(),
+      expected: { valid: true, ok: true, state: "authorized" },
+    },
+    {
+      name: "refreshable-expired",
+      tokens: { access_token: "synthetic", refresh_token: "synthetic-refresh", token_type: "Bearer", expires_in: 0 },
+      savedAt: (): string => "2020-01-01T00:00:00.000Z",
+      expected: { valid: true, ok: true, state: "refresh_due" },
+    },
+    {
+      name: "nonrefreshable-expired",
+      tokens: { access_token: "synthetic", token_type: "Bearer", expires_in: 0 },
+      savedAt: (): string => "2020-01-01T00:00:00.000Z",
+      expected: { valid: false, ok: false, state: "reauthorization_required" },
+    },
+  ])("config validate classifies managed OAuth state $name without static-secret parsing", async ({ tokens, savedAt, expected }) => {
+    const { configDir, config } = await managedOAuthConfigDir();
+    const oauthCredentialDir = await mkdtemp(join(tmpdir(), "mpas-cli-oauth-session-"));
+    await writeFile(
+      join(oauthCredentialDir, "managed-session.json"),
+      `${JSON.stringify(managedOAuthSession(config, tokens, savedAt()))}\n`,
+      { mode: 0o600 },
+    );
+
+    const result = await validateConfig("github-mirror", { configDir, credentialDir: oauthCredentialDir });
+    expect(result.valid).toBe(expected.valid);
+    expect(result.credentials).toEqual([expect.objectContaining({
+      provider: "managed-oauth",
+      ok: expected.ok,
+      state: expected.state,
+    })]);
+  });
+
+  it.each([
+    { name: "missing", contents: undefined, mode: 0o600, error: "OAUTH_SESSION_NOT_FOUND", state: "missing" },
+    { name: "malformed", contents: "not-json", mode: 0o600, error: "OAUTH_SESSION_MALFORMED", state: "malformed" },
+    { name: "insecure", contents: "valid", mode: 0o644, error: "OAUTH_SESSION_INSECURE_PERMISSIONS", state: "insecure_permissions" },
+  ])("config validate rejects $name managed OAuth sessions on the managed path", async ({ contents, mode, error, state }) => {
+    const { configDir, config } = await managedOAuthConfigDir();
+    const oauthCredentialDir = await mkdtemp(join(tmpdir(), "mpas-cli-oauth-negative-"));
+    const path = join(oauthCredentialDir, "managed-session.json");
+    if (contents !== undefined) {
+      const body = contents === "valid"
+        ? JSON.stringify(managedOAuthSession(
+            config,
+            { access_token: "synthetic", refresh_token: "synthetic-refresh", token_type: "Bearer", expires_in: 3600 },
+            new Date().toISOString(),
+          ))
+        : contents;
+      await writeFile(path, `${body}\n`, { mode });
+      await chmod(path, mode);
+    }
+
+    const result = await validateConfig("github-mirror", { configDir, credentialDir: oauthCredentialDir });
+    expect(result).toMatchObject({
+      valid: false,
+      credentials: [{ provider: "managed-oauth", ok: false, error, state }],
+    });
+    expect(result.credentials[0]?.error).not.toBe("CREDENTIAL_INVALID_SHAPE");
+  });
+
+  it("preserves the static-secret validation control", async () => {
+    const result = await validateConfig("github-mirror", {
+      configDir: join(fixturesDir, "configs"),
+      credentialDir: await credentialDir(),
+    });
+    expect(result).toMatchObject({
+      valid: true,
+      credentials: [{ provider: "file", ok: true }],
     });
   });
 });
