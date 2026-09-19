@@ -68,6 +68,12 @@ export {
   type PayloadValidationResult,
 } from "./lib/plugin-loader.js";
 export * from "./lib/receipt-builder.js";
+export {
+  verifyExecutionReceipt as verifyReceiptCanonical,
+  type ReceiptVerificationOptions,
+  type ReceiptVerificationErrorCode,
+  type ReceiptVerificationResult,
+} from "./lib/receipt-verifier.js";
 export * from "./lib/auth-requirements-builder.js";
 export * from "./lib/did-jwk.js";
 export * from "./lib/trace.js";
