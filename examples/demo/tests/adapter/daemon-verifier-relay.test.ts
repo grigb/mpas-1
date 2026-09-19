@@ -26,6 +26,9 @@ import type {
   VerifierRelayStateStore,
 } from "../../src/adapter/verifier-relay-worker.js";
 
+/** Deterministic clock pinned inside the fixture validity window. */
+const FIXTURE_NOW = Date.parse("2026-06-05T19:00:00.000Z");
+
 const fixtures = fileURLToPath(new URL("../fixtures/", import.meta.url));
 const relayUrl = "https://relay.example";
 
@@ -98,7 +101,7 @@ createInterface({input:process.stdin}).on("line", line => {
       adapterKeyPath,
       journalPath,
       port: 0,
-      maxEnvelopeValidityMs: Number.MAX_SAFE_INTEGER,
+      now: FIXTURE_NOW,
       trustContext: null,
       confirmPluginUse: async () => true,
       verifierRelayUrl: relayUrl,
