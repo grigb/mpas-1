@@ -411,6 +411,57 @@ The Verifier fails closed if a delivery is malformed or its payload is not an `A
 
 Equivalent environment variables are `MPAS_VERIFIER_RELAY_URL`, `MPAS_VERIFIER_RELAY_STATE`, and `MPAS_VERIFIER_POLL_INTERVAL_MS`. The matching command-line options are `--verifier-relay-url`, `--verifier-relay-state`, and `--verifier-poll-interval-ms`. The former `COORDINATION` environment names and `--verifier-coordination-*` flags remain compatibility aliases.
 
+## Durable dispatch storage
+
+The Credential Adapter uses the SDK's single `DispatchLedger` lifecycle engine.
+`FileDispatchJournal` retains its construction name but is now the reference
+SQLite byte store, not a JSONL event log. Direct `/mpas/v1/action` and canonical
+`/mpas/v1/verifier/action` requests share this ledger. Relay cursors and response
+caches do not authorize execution or replace the dispatch record.
+
+The backend needs built-in `node:sqlite`, available without a flag on Node 22.13+
+and tested here on Node 22.22.3. Construction probes that capability and fails if
+it is unavailable; it does not download a dependency or use a weaker fallback.
+The portable SDK ledger does not import SQLite. Package engine declarations have
+not been changed and are not a claim that every Node 22 minor supports this backend.
+
+The configured `journalPath` / `MPAS_JOURNAL_PATH` and default
+`~/.mpas/journal/dispatch-ledger.jsonl` are unchanged. Despite that suffix, new
+files use SQLite. An existing nonempty JSONL file, unknown SQLite schema/version,
+or corrupt record stops startup without conversion. Do not rename, delete, or
+point around old replay state to make startup succeed. Stop dispatch and retain
+the original file for a separately reviewed operator migration; no migration is
+provided by this change.
+
+The store uses one `dispatch_ledger` table, atomic unique insertion and conditional
+updates/deletes. It sets and checks `journal_mode=DELETE`, `synchronous=EXTRA`,
+`fullfsync=ON`, and a 5000 ms busy timeout. New files/directories use private
+permissions; symlink, relative, directory, and invalid database paths are rejected.
+Canonical record bytes are deterministic, not the full SQLite database file.
+This relies on SQLite and the host filesystem honoring durable commits; process
+crash and injected storage-failure tests are not physical power-loss certification.
+
+Start only after the previous daemon's dispatch workers have stopped. Before
+listening, the daemon durably recovers every remaining executing Action as
+indeterminate. Opening a joining store connection alone does not recover live
+work. There is no automatic retry for an indeterminate Action. Shutdown stops
+relay work and closes the database; failed startup also closes it. Use a stopped
+daemon with closed database handles for backups, and retain the entire replay
+history needed by the configured validity interval.
+
+`ledger.prune()` is an explicit embedded-host operation, not a daemon timer or
+new CLI command. It removes resolved records only strictly after Action expiry
+plus the trusted ledger timestamp tolerance (default zero). It preserves live
+executing records and every response still required for recovery. The verifier's
+maximum validity check remains required; pruning does not authorize expired work.
+
+Internal relay recovery returns the exact persisted terminal response and receipt.
+Public replay rejects. A competing result cannot replace the first resolution;
+missing indeterminate responses are signed and attached once. Storage failure
+before the grant closes the prepared target and sends zero calls. A failure after
+transmission returns an error without an unpersisted terminal result; the durable
+state blocks retransmission. Consumers still verify receipt signatures separately.
+
 ## Getting Started
 
 See [guides/setup-macos.md](guides/setup-macos.md) for the full demo setup guide covering:
