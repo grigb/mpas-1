@@ -49,6 +49,8 @@ export interface DaemonOptions {
   host?: string;
   port?: number;
   maxEnvelopeValidityMs?: number;
+  /** Deterministic clock for testing. Defaults to Date.now(). */
+  now?: number;
   journalPath?: string;
   tracePath?: string;
   /** Hosted Action Relay used for outbound Verifier delivery polling. */
@@ -136,6 +138,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<StartedD
     adapterDid: adapterKey.did,
     adapterSigner: KeyManager.fromJwk(adapterKey.privateJwk, { did: adapterKey.did }),
     maxEnvelopeValidityMs: options.maxEnvelopeValidityMs,
+    now: options.now,
     ledger,
     traceLogger,
   });

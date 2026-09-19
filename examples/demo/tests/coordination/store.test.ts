@@ -15,12 +15,15 @@ interface FixtureKey {
   privateJwk: JWK;
 }
 
+/** Deterministic clock pinned inside the fixture validity window. */
+const FIXTURE_NOW = Date.parse("2026-06-05T19:00:00.000Z");
+
 const adapterDid = "did:web:adapter.local" as Did;
 
 describe("CoordinationStore", () => {
   it("stores pending actions and returns signer-specific approval requests", async () => {
     const request = await coordinationActionRequest();
-    const store = new CoordinationStore();
+    const store = new CoordinationStore({ now: FIXTURE_NOW });
 
     const result = store.createWorkflow(request);
     const maintainerPoll = store.poll((await fixtureKey("maintainer-a")).did);
@@ -43,9 +46,9 @@ describe("CoordinationStore", () => {
   it("pins Action IDs independently within relay and coordination state", async () => {
     const request = await coordinationActionRequest();
     const conflictingPackage = structuredClone(request.actionPackage);
-    conflictingPackage.actionEnvelope.expiresAt = "2030-01-02T00:00:00.000Z";
+    conflictingPackage.actionEnvelope.expiresAt = "2026-06-06T18:00:00.000Z";
     conflictingPackage.approvalBundle.actionEnvelopeHash = computeJsonHash(conflictingPackage.actionEnvelope);
-    const store = new CoordinationStore();
+    const store = new CoordinationStore({ now: FIXTURE_NOW });
 
     store.createWorkflow(request);
 
@@ -69,7 +72,7 @@ describe("CoordinationStore", () => {
 
   it("tracks approvals, ignores duplicate signer counts, and assembles a completed action package", async () => {
     const request = await coordinationActionRequest();
-    const store = new CoordinationStore();
+    const store = new CoordinationStore({ now: FIXTURE_NOW });
     const maintainerA = await fixtureKey("maintainer-a");
     const maintainerB = await fixtureKey("maintainer-b");
 
@@ -108,7 +111,7 @@ describe("CoordinationStore", () => {
 
   it("makes each Signer's first decision final for an Action Envelope", async () => {
     const request = await coordinationActionRequest();
-    const store = new CoordinationStore();
+    const store = new CoordinationStore({ now: FIXTURE_NOW });
     const maintainerA = await fixtureKey("maintainer-a");
     store.createWorkflow(request);
 
@@ -149,7 +152,7 @@ describe("CoordinationStore", () => {
 
   it("rejects a workflow as soon as immutable decisions make its threshold unreachable", async () => {
     const request = await coordinationActionRequest();
-    const store = new CoordinationStore();
+    const store = new CoordinationStore({ now: FIXTURE_NOW });
     const maintainerA = await fixtureKey("maintainer-a");
     store.createWorkflow(request);
 
@@ -199,7 +202,7 @@ describe("CoordinationStore", () => {
     cases.push(envelopeMismatch);
 
     for (const invalid of cases) {
-      const store = new CoordinationStore();
+      const store = new CoordinationStore({ now: FIXTURE_NOW });
       expect(() => store.createWorkflow(invalid)).toThrowError(MpasServiceError);
       expect(store.poll(invalid.actionPackage.actionEnvelope.proposer.did).actionUpdates).toHaveLength(0);
     }
@@ -207,7 +210,7 @@ describe("CoordinationStore", () => {
 
   it("preserves unenforcing behavior by storing but not counting an ineligible Approval", async () => {
     const request = await coordinationActionRequest();
-    const store = new CoordinationStore();
+    const store = new CoordinationStore({ now: FIXTURE_NOW });
     const adapter = await fixtureKey("adapter");
     store.createWorkflow(request);
 
@@ -225,7 +228,7 @@ describe("CoordinationStore", () => {
 
   it("rejects self-approval — proposer cannot approve their own action", async () => {
     const request = await coordinationActionRequest();
-    const store = new CoordinationStore();
+    const store = new CoordinationStore({ now: FIXTURE_NOW });
     const proposer = await fixtureKey("proposer");
 
     // Make the proposer eligible as a signer for this test
@@ -247,7 +250,7 @@ describe("CoordinationStore", () => {
 
   it("cancels awaiting actions, hides them from signers, and rejects later approvals", async () => {
     const request = await coordinationActionRequest();
-    const store = new CoordinationStore();
+    const store = new CoordinationStore({ now: FIXTURE_NOW });
     const maintainerA = await fixtureKey("maintainer-a");
 
     store.createWorkflow(request);

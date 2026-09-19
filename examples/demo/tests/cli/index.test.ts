@@ -7,6 +7,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import { startDaemon } from "../../src/adapter/daemon.js";
 import { dryRunActionFile, runCli } from "../../src/cli/index.js";
 
+/** Deterministic clock pinned inside the fixture validity window. */
+const FIXTURE_NOW = Date.parse("2026-06-05T19:00:00.000Z");
+
 const fixturesDir = fileURLToPath(new URL("../fixtures/", import.meta.url));
 const startedApps: FastifyInstance[] = [];
 
@@ -41,7 +44,7 @@ async function startFixtureDaemon() {
     credentialDir: await credentialDir(),
     adapterKeyPath: join(fixturesDir, "test-keys", "adapter.json"),
     port: 0,
-    maxEnvelopeValidityMs: Number.MAX_SAFE_INTEGER,
+    now: FIXTURE_NOW,
     journalPath: join(journalDir, "dispatch-ledger.jsonl"),
     trustContext: null,
     confirmPluginUse: async () => true,
@@ -119,6 +122,7 @@ describe("CLI daemon and testing commands", () => {
 
     const result = await dryRunActionFile(join(fixturesDir, "core", "valid-no-approval-required.json"), {
       configDir: tmpDir,
+      now: FIXTURE_NOW,
     });
 
     expect(result).toMatchObject({
@@ -130,6 +134,7 @@ describe("CLI daemon and testing commands", () => {
   it("test dry-run reports additional approvals for insufficient-approvals.json", async () => {
     const result = await dryRunActionFile(join(fixturesDir, "core", "insufficient-approvals.json"), {
       configDir: join(fixturesDir, "configs"),
+      now: FIXTURE_NOW,
     });
 
     expect(result).toMatchObject({

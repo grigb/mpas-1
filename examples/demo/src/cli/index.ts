@@ -305,7 +305,7 @@ export async function runCli(
   }
 }
 
-export async function dryRunActionFile(path: string, options: Pick<ParsedOptions, "configDir"> = {}) {
+export async function dryRunActionFile(path: string, options: Pick<ParsedOptions, "configDir"> & { now?: number } = {}) {
   const parseResult = parseActionPackage(JSON.parse(await readFile(path, "utf8")));
   if (!parseResult.ok) {
     return {
@@ -337,6 +337,7 @@ export async function dryRunActionFile(path: string, options: Pick<ParsedOptions
   const verification = await verifyActionPackage(actionPackage, {
     trustedSigners: loadedConfig.config.signerKeys,
     trustedApplicationDids: [loadedConfig.config.target.applicationDid],
+    now: options.now,
   });
   if (verification.status !== "verified") {
     return {
