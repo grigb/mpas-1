@@ -811,7 +811,7 @@ describe("HTTP endpoint", () => {
       });
     }
     const ready = coordination.poll(partialPackage.actionEnvelope.proposer.did).actionUpdates[0];
-    expect(ready.state).toBe("readyForResubmission");
+    expect(ready.state).toBe("readyForSubmission");
     if (!ready.actionPackage) throw new Error("coordination did not assemble the completed package");
     const final = await target.app.inject({
       method: "POST", url: "/mpas/v1/action", headers: { "content-type": "application/mpas+json" },
