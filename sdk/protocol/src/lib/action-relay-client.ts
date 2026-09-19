@@ -8,6 +8,7 @@ import type {
   RelaySessionResponse,
   RelayWorkAvailable,
 } from "../types/mpas.js";
+import { strictJsonParse } from "../utils/strict-json.js";
 import {
   parseActionRequestEnvelope,
   parseActionResponse,
@@ -243,7 +244,7 @@ export class ActionRelayClient {
           event,
           () => new ActionRelayResponseError("WebSocket message data was not UTF-8 text."),
         );
-        await input.onWorkAvailable(parseRelayWorkAvailable(JSON.parse(data)));
+        await input.onWorkAvailable(parseRelayWorkAvailable(strictJsonParse(data)));
       }).catch(() => socket.close(1003, "invalid MPAS notification"));
     });
     return { socket, relayUrl: this.url, audience: this.audience, did };

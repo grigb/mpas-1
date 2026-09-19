@@ -354,7 +354,7 @@ export class CoordinationServiceClient {
           event,
           () => new CoordinationResponseError("WebSocket message data was not UTF-8 text."),
         );
-        await input.onWorkAvailable(parseCoordinationWorkAvailable(JSON.parse(data)));
+        await input.onWorkAvailable(parseCoordinationWorkAvailable(strictJsonParse(data)));
       }).catch(() => socket.close(1003, "invalid MPAS notification"));
     });
     return { socket, coordinationUrl: this.url, audience: this.audience, did };

@@ -6,6 +6,7 @@ import type {
   Did,
   MpasHttpError,
 } from "../types/mpas.js";
+import { strictJsonParse } from "../utils/strict-json.js";
 import {
   parseActionRequest,
   parseActionRequestEnvelope,
@@ -160,7 +161,7 @@ export class ActionEndpointClient {
       const responseText = await response.text();
       let parsed: unknown;
       try {
-        parsed = responseText.length === 0 ? undefined : JSON.parse(responseText) as unknown;
+        parsed = responseText.length === 0 ? undefined : strictJsonParse(responseText);
       } catch (error) {
         throw new ActionEndpointClientError(
           "Action endpoint response was not valid JSON.",
