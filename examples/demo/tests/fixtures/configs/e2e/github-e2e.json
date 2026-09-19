@@ -2,6 +2,7 @@
   "version": "1",
   "type": "MpasAdapterDeploymentConfig",
   "name": "github-e2e",
+  "passThrough": "allow",
   "target": {
     "applicationDid": "did:web:github-mirror.example"
   },

@@ -279,11 +279,13 @@ For evaluation semantics and the internal endpoint context, see the
 | `executionTarget`      | How to call the real MCP server (`mcp.stdio` spawns a child process)        |
 | `policy`               | Full `MpasApplicationPolicy` object: signerGroups, policies (keyed by action name), defaultRequirement |
 | `signerKeys`           | Key registry: DID + label (+ publicJwk for non-did:jwk methods) for each participant |
-| `passThrough`          | Routing for ungoverned operations: `"allow"` (default) or `"deny"`          |
+| `passThrough`          | Ungoverned operations are denied when omitted or `"deny"`; explicit `"allow"` opts in |
 
 **Relationship between plugin and policy:** The plugin describes what operations exist and their payload schemas. The `policy` object (an embedded `MpasApplicationPolicy`) defines who can propose, who can approve, and what thresholds apply. An operation is governed if it's in the plugin's `operations` OR has an entry in `policy.policies`.
 
-**The governance boundary:** anything outside the governed set is routed as pass-through — after proposer gating and signature verification it executes with the adapter's credential on the proposer's signature alone, and `defaultRequirement` does not apply. This is the plugin-anchored trust model: the plugin publisher decides which operations need governance, and the operator accepts that boundary after reviewing available OMATrust attestations and linked-identifier evidence. The demo exposes `create_issue_mirror` this way on purpose to demonstrate the boundary. If you care about an operation, put it in the plugin or give it a policy entry; power users can refuse ungoverned operations entirely with `passThrough: "deny"`.
+**The governance boundary:** this reference adapter denies operations absent from both the trusted plugin and policy before credential access or target preparation. An operator may explicitly set `passThrough: "allow"` to execute such operations with the adapter's credential after proposer gating and signature verification. That opt-in skips schema and policy evaluation, including `defaultRequirement`, so new upstream tools can gain credential access without independent approval. Add important operations to the plugin or trusted policy instead. The two pass-through test configurations explicitly opt in for `create_issue_mirror`; omission remains a denial. This is profile-permitted deployment hardening, not a change to the MCP or Policy profiles.
+
+**No hidden tool-call retries:** HTTP tool calls do not follow redirects or retry after authentication or scope-demand responses. Those responses yield fixed, redacted diagnostics and an `indeterminate` receipt after transmission; identical retries and restart recovery cannot dispatch the action again. Operator login and side-effect-free refresh before dispatch remain supported.
 
 **Safe default-policy setup:** Use a positive threshold with a maintainer group
 for `policy.defaultRequirement`; this covers every plugin operation unless an

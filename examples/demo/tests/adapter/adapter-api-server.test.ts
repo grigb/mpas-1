@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { compactVerify, importJWK, type JWK } from "jose";
-import { buildDeliveryEnvelope, parseDispatchRecord, serializeDispatchRecord, type ActionPackage } from "@oma3/mpas";
+import { ActionPackageBuilder, ApprovalBuilder, KeyManager, buildDeliveryEnvelope, parseDispatchRecord, serializeDispatchRecord, signMpasRfc9421, type ActionPackage, type ActionRequest, type DeliveryEnvelope } from "@oma3/mpas";
 import "../fixtures/action-fixture-clock.js";
 import { loadDeploymentConfigs } from "../../src/adapter/config-loader.js";
 import { FileCredentialProvider } from "../../src/adapter/credential-provider.js";
@@ -18,6 +18,8 @@ import { DispatchLedger, FileDispatchJournal } from "../../src/adapter/dispatch-
 import type { Did, ExecutionReceipt, ReceiptPayload } from "../../src/core/types.js";
 import { computeJsonHash } from "../../src/core/verification.js";
 import { TraceLogger } from "../../src/core/trace.js";
+import { createCoordinationApiServer } from "../../src/coordination/coordination-api-server.js";
+import { startOAuthProtectedMcpFixture, type OAuthProtectedMcpFixture } from "../fixtures/oauth-protected-mcp.js";
 
 /** Deterministic clock pinned inside the fixture validity window. */
 const FIXTURE_NOW = Date.parse("2026-06-05T19:00:00.000Z");
@@ -31,6 +33,7 @@ const protocolVersionFixtureServer = fileURLToPath(
 const missingFixtureServer = join(fixturesDir, "adapter", "missing-mcp-server.mjs");
 const apps: FastifyInstance[] = [];
 const stores: FileDispatchJournal[] = [];
+const httpTargets: OAuthProtectedMcpFixture[] = [];
 
 interface KeyFixture {
   did: Did;
@@ -165,13 +168,275 @@ lines.on("line", line => {
   };
 }
 
+/** Real HTTP target and accepted durable store, with only synthetic credentials. */
+async function httpBoundaryTarget(status: 200 | 401 | 403 | 307 | 308 = 200, managed = false) {
+  const fixture = await startOAuthProtectedMcpFixture({ toolStatus: status, toolDelayMs: 10,
+    toolErrorBody: "SECRET_BODY fixture-access-token fixture-refresh-token",
+    toolChallenge: 'Bearer error="insufficient_scope", scope="SECRET_SCOPE admin"' });
+  httpTargets.push(fixture);
+  const configs = await loadDeploymentConfigs(await makeAutoApproveConfigDir(), { confirmPluginUse: async () => true });
+  if (!configs.ok) throw new Error(configs.error.message);
+  const loaded = configs.configs[0];
+  loaded.config.executionTarget = { type: "mcp.http", url: fixture.resourceUrl, timeoutMs: 1000,
+    ...(managed ? { auth: { type: "oauth2" as const, session: "fixture-session", scopes: ["mcp:tools"] } }
+      : { headers: { authorization: "Bearer {{credential:github-mirror-token}}" } }) };
+  const dir = await credentialDir();
+  const credentialPath = join(dir, "github-mirror-token.json");
+  const applicationDid = loaded.config.target.applicationDid;
+  const owner = `local-os-user:${process.getuid!()}`;
+  const session = { version: 2, session: "fixture-session", credentialHandle: "github-mirror-token", applicationDid,
+    resourceUrl: fixture.resourceUrl, owner, sharing: { applicationDids: [applicationDid], operatorPrincipals: [owner] },
+    binding: { applicationDid, resourceUrl: fixture.resourceUrl, issuer: fixture.issuer,
+      clientMode: "dynamic", clientId: "fixture-public-client", clientConfiguration: JSON.stringify({ type: "dynamic" }),
+      scopeConfiguration: JSON.stringify({ scopes: ["mcp:tools"], refreshScope: "offline_access" }),
+      requestedScopes: ["mcp:tools", "offline_access"], redirectUrl: "http://127.0.0.1:49152/oauth/callback" },
+    clientInformation: { client_id: "fixture-public-client" },
+    tokens: { access_token: "fixture-access-token", refresh_token: "fixture-refresh-token", token_type: "Bearer", expires_in: 3600, scope: "mcp:tools" },
+    tokensSavedAt: new Date().toISOString(), refreshJitterMs: 0 };
+  await writeFile(credentialPath, JSON.stringify(managed ? session : { value: "fixture-access-token" }), { mode: 0o600 });
+  const provider = new FileCredentialProvider(dir);
+  const credentials = vi.spyOn(provider, "getCredential");
+  const adapter = await readJson<KeyFixture>(join(fixturesDir, "test-keys", "adapter.json"));
+  const proposer = KeyManager.fromJwk((await readJson<KeyFixture>(join(fixturesDir, "test-keys", "proposer.json"))).privateJwk);
+  const builder = new ActionPackageBuilder({ applicationDid, executionProfile: { id: loaded.plugin.executionProfile.id as Did, format: "mcp.toolsCall" }, keyManager: proposer });
+  const journalPath = join(dir, "dispatch.sqlite");
+  const store = new FileDispatchJournal(journalPath); stores.push(store);
+  const ledger = new DispatchLedger(store);
+  const options = { configsByApplicationDid: configs.configsByApplicationDid, credentialProvider: provider,
+    adapterDid: adapter.did, adapterSigningKey: adapter.privateJwk, ledger };
+  const app = createAdapterApiServer(options); apps.push(app);
+  return { app, fixture, loaded, credentials, credentialPath, adapter, proposer, builder, ledger, store, journalPath, options };
+}
+
+/** Exercise the existing enforcing Action Relay with genuine public-SDK signatures. */
+async function signedRelayRequest(app: FastifyInstance, path: string, payload: object, signer: KeyManager,
+  audience = "https://relay.example.test", nonce?: string) {
+  const body = JSON.stringify({ ...payload, audience });
+  const headers = await signMpasRfc9421({ method: "POST", path, body: Buffer.from(body), signer, nonce });
+  return app.inject({ method: "POST", url: path,
+    headers: { ...headers, "content-type": "application/mpas+json" }, payload: body });
+}
+
 afterEach(async () => {
   await Promise.all(apps.splice(0).map((app) => app.close()));
   for (const store of stores.splice(0)) store.close();
+  await Promise.all(httpTargets.splice(0).map(target => target.close()));
   vi.restoreAllMocks();
 });
 
 describe("HTTP endpoint", () => {
+  it.each([200, 401, 403, 307, 308] as const)("stores the signed HTTP %s outcome and forbids concurrent, identical and restarted retransmission", async status => {
+    const target = await httpBoundaryTarget(status, true);
+    const pkg = await target.builder.buildFromToolCall("create_issue_mirror", { title: "transport receipt proof" });
+    const hash = computeJsonHash(pkg.actionEnvelope);
+    const request = { method: "POST" as const, url: "/mpas/v1/action", payload: { version: "1", type: "ActionRequest", actionPackage: pkg } };
+    const tokenBefore = await readFile(target.credentialPath, "utf8");
+    const trace = vi.spyOn(TraceLogger.prototype, "emit");
+    const pair = await Promise.all([target.app.inject(request), target.app.inject(request)]);
+    const outcome = status === 200 ? "executed" : "indeterminate";
+    const winners = pair.filter(response => response.json().result === outcome);
+    expect(winners).toHaveLength(1);
+    const winner = winners[0].json();
+    expect(pair.filter(response => ["pending", "rejected"].includes(response.json().result))).toHaveLength(1);
+    expect((await verifyReceiptPayload(winner.executionReceipt)).result).toBe(outcome);
+    expect(target.ledger.recoveryFor(pkg.actionEnvelope.actionId, hash)?.response).toEqual(winner);
+    if (status !== 200) {
+      const code = status === 401 ? "OAUTH_AUTHENTICATION_FAILED" : status === 403 ? "OAUTH_SCOPE_DEMAND" : "TRANSPORT_ERROR";
+      expect(winner).toMatchObject({ error: { code }, context: { diagnostic: { code, phase: "tools/call", transport: "streamable-http" } } });
+      expect(winner).not.toHaveProperty("executionResult");
+    } else expect(winner.executionResult).toEqual({ content: [{ type: "text", text: "authorized" }] });
+    expect(JSON.stringify([winner, trace.mock.calls])).not.toMatch(/SECRET_|fixture-access-token|fixture-refresh-token/);
+    expect((await target.app.inject(request)).json()).toMatchObject({ result: "rejected", error: { code: "REPLAY_DETECTED" } });
+    await target.app.close(); target.ledger.close();
+    const reopened = new FileDispatchJournal(target.journalPath); stores.push(reopened);
+    const ledger = new DispatchLedger(reopened);
+    expect(ledger.recoverExecuting()).toBe(0);
+    expect(ledger.recoveryFor(pkg.actionEnvelope.actionId, hash)?.response).toEqual(winner);
+    const restarted = createAdapterApiServer({ ...target.options, ledger }); apps.push(restarted);
+    expect((await restarted.inject(request)).json()).toMatchObject({ result: "rejected", error: { code: "REPLAY_DETECTED" } });
+    expect(target.fixture.requests.filter(r => r.rpcMethod === "tools/call")).toHaveLength(1);
+    expect(target.fixture.toolEffects).toEqual([{ name: "create_issue_mirror", arguments: { title: "transport receipt proof" } }]);
+    expect(target.fixture.tokenRequests).toEqual([]);
+    expect(target.fixture.registrationRequests).toEqual([]);
+    expect(await readFile(target.credentialPath, "utf8")).toBe(tokenBefore);
+    console.log(JSON.stringify({ case: "durable transport", status, targetEffects: 1, realToolRequests: 1,
+      initialized: target.fixture.requests.filter(r => r.rpcMethod === "initialize").length,
+      authFollowups: 0, tokenBytesUnchanged: true, exactRecoveredResponse: winner }));
+  });
+
+  it.each([undefined, "deny", "allow"] as const)("applies trusted pass-through %s before credential or target access", async passThrough => {
+    const target = await httpBoundaryTarget();
+    target.loaded.config.passThrough = passThrough;
+    target.loaded.config.policy.defaultRequirement = { type: "threshold", threshold: 2, eligibleSignerGroup: "maintainers" };
+    const pkg = await target.builder.buildFromToolCall("create_issue_mirror", { title: "unknown operation" });
+    const response = await target.app.inject({ method: "POST", url: "/mpas/v1/action",
+      payload: { version: "1", type: "ActionRequest", actionPackage: pkg, passThrough: "allow" } });
+    // The routing parser permits extension fields. This untrusted field is
+    // ignored: only the loaded deployment configuration can grant pass-through.
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject(passThrough === "allow" ? { result: "executed" }
+      : { result: "rejected", error: { code: "OPERATION_NOT_GOVERNED" } });
+    expect(target.credentials).toHaveBeenCalledTimes(passThrough === "allow" ? 1 : 0);
+    expect(target.fixture.toolEffects).toHaveLength(passThrough === "allow" ? 1 : 0);
+    expect(target.fixture.requests.filter(r => r.rpcMethod === "initialize")).toHaveLength(passThrough === "allow" ? 1 : 0);
+    console.log(JSON.stringify({ case: "trusted pass through", setting: passThrough ?? "omitted", credentialReads: target.credentials.mock.calls.length,
+      initialized: target.fixture.requests.filter(r => r.rpcMethod === "initialize").length, targetCalls: target.fixture.toolEffects.length }));
+  });
+
+  it.each(["private direct", "authenticated relay"] as const)("preserves Application, profile, payload, Approval and proposer binding over %s", async route => {
+    const target = await httpBoundaryTarget();
+    const adapterSigner = KeyManager.fromJwk(target.adapter.privateJwk);
+    const otherSigner = KeyManager.fromJwk((await readJson<KeyFixture>(join(fixturesDir, "test-keys", "maintainer-a.json"))).privateJwk);
+    const cases = ["application", "profile", "format", "payload hash", "payload shape", "Approval signature", "Approval binding", "proposer", "positive"] as const;
+    const trace = vi.spyOn(TraceLogger.prototype, "emit");
+    for (const scenario of cases) {
+      const signer = scenario === "proposer" ? otherSigner : target.proposer;
+      const builder = new ActionPackageBuilder({ keyManager: signer,
+        applicationDid: scenario === "application" ? "did:web:other.example" : target.loaded.config.target.applicationDid,
+        executionProfile: { id: scenario === "profile" ? "did:web:profiles.example:unsupported" : target.loaded.plugin.executionProfile.id as Did,
+          format: scenario === "format" ? "unsupported.format" : "mcp.toolsCall" } });
+      const pkg = await builder.buildFromPayload(scenario === "payload shape" || scenario === "profile"
+        ? { name: "create_issue_mirror", arguments: [], extra: true }
+        : { name: "create_issue_mirror", arguments: { title: scenario } });
+      if (scenario === "payload hash") pkg.executionPayload = { name: "create_issue_mirror", arguments: { changed: true } };
+      if (scenario === "Approval signature") {
+        const parts = pkg.approvalBundle.approvals[0].signature.value.split(".");
+        parts[2] = (parts[2][0] === "A" ? "B" : "A") + parts[2].slice(1);
+        pkg.approvalBundle.approvals[0].signature.value = parts.join(".");
+      }
+      if (scenario === "Approval binding") {
+        const different = await builder.buildFromToolCall("create_issue_mirror", { title: "different envelope" });
+        pkg.approvalBundle.approvals = different.approvalBundle.approvals;
+      }
+      const request: ActionRequest = { version: "1", type: "ActionRequest", actionPackage: pkg };
+      trace.mockClear();
+      let response;
+      if (route === "private direct") {
+        // This supported private, unenforcing surface deliberately has no HTTP signature.
+        response = await target.app.inject({ method: "POST", url: "/mpas/v1/action", payload: request });
+      } else {
+        const relay = createCoordinationApiServer({ designatedVerifierDid: target.adapter.did,
+          authorizedRecipientDids: [target.proposer.did, otherSigner.did], relayResponseWaitMs: 5,
+          auth: { enforcement: true, audiences: ["https://relay.example.test"] } });
+        apps.push(relay);
+        const envelope = buildDeliveryEnvelope({ sender: signer.did, recipients: [target.adapter.did], payload: request });
+        const submitted = await signedRelayRequest(relay, "/mpas/v1/verifier/action", envelope, signer);
+        const polled = await signedRelayRequest(relay, "/mpas/v1/relay/poll",
+          { version: "1", type: "RelayPollRequest", did: target.adapter.did }, adapterSigner);
+        expect(polled.statusCode).toBe(200);
+        const deliveries = polled.json().deliveries as DeliveryEnvelope<ActionRequest>[];
+        if (scenario === "payload hash") {
+          expect(submitted.statusCode).toBe(400);
+          expect(submitted.json().error.code).toBe("artifact_hash_mismatch");
+          expect(deliveries).toEqual([]);
+          response = submitted;
+        } else {
+          expect(submitted.statusCode).toBe(503); // Bounded relay wait; queued delivery is retained.
+          expect(submitted.json().error.code).toBe("timeout");
+          expect(deliveries).toHaveLength(1);
+          expect(deliveries[0].payload).toEqual(request);
+          // Trusted internal delivery after authenticated relay retrieval does not
+          // invent an HTTP-signature requirement at the private adapter endpoint.
+          response = await target.app.inject({ method: "POST", url: "/mpas/v1/verifier/action", payload: deliveries[0] });
+          if (scenario === "positive") {
+            const delivered = await signedRelayRequest(relay, "/mpas/v1/relay/delivery",
+              buildDeliveryEnvelope({ sender: target.adapter.did, recipients: [target.proposer.did], payload: response.json() }), adapterSigner);
+            expect(delivered.statusCode).toBe(200);
+            const received = await signedRelayRequest(relay, "/mpas/v1/relay/poll",
+              { version: "1", type: "RelayPollRequest", did: target.proposer.did }, target.proposer);
+            expect(received.json().deliveries[0].payload).toEqual(response.json());
+          }
+        }
+      }
+      const body = response.json();
+      if (scenario === "positive") {
+        expect(body).toMatchObject({ result: "executed", executionResult: { content: [{ type: "text", text: "authorized" }] } });
+        expect((await verifyReceiptPayload(body.executionReceipt)).result).toBe("executed");
+      } else if (scenario === "profile" || scenario === "format") {
+        expect(body).toMatchObject({ result: "notSupported", error: { code: "UNSUPPORTED_EXECUTION_PROFILE" } });
+      } else if (scenario === "payload shape") {
+        // The accepted public SDK rejects this shape before adapter-specific
+        // structure/proposer/routing checks; preserve that existing ordering.
+        expect(body).toMatchObject({ result: "rejected", error: { code: "INVALID_EXECUTION_PAYLOAD" } });
+      } else if (scenario === "payload hash" && route === "authenticated relay") {
+        expect(body.error.code).toBe("artifact_hash_mismatch");
+      } else {
+        const code = scenario === "application" ? "UNKNOWN_APPLICATION" : scenario === "payload hash" ? "PAYLOAD_HASH_MISMATCH"
+          : scenario === "proposer" ? "PROPOSER_NOT_AUTHORIZED" : "APPROVAL_BUNDLE_INVALID";
+        expect(body).toMatchObject({ result: "rejected", error: { code } });
+      }
+      const steps = trace.mock.calls.filter(call => call[0] === "verification_step").map(call => call[1]?.step);
+      if (scenario === "profile" || scenario === "format") expect(steps).toEqual(["structural_validation", "expiry_check", "execution_profile_check"]);
+      if (scenario === "payload shape") expect(steps).not.toContain("proposer_gating");
+      if (scenario === "proposer") expect(steps.at(-1)).toBe("proposer_gating");
+      expect(target.credentials).toHaveBeenCalledTimes(scenario === "positive" ? 1 : 0);
+      expect(target.fixture.requests.filter(r => r.rpcMethod === "initialize")).toHaveLength(scenario === "positive" ? 1 : 0);
+      expect(target.fixture.toolEffects).toHaveLength(scenario === "positive" ? 1 : 0);
+      console.log(JSON.stringify({ case: "binding", route, scenario, status: response.statusCode, result: body.result,
+        code: body.error?.code, steps, targetEffects: target.fixture.toolEffects.length, credentialReads: target.credentials.mock.calls.length }));
+    }
+  });
+
+  it("rejects relay transport identity and DeliveryEnvelope mismatches before any target access", async () => {
+    const target = await httpBoundaryTarget();
+    const adapterSigner = KeyManager.fromJwk(target.adapter.privateJwk);
+    const relay = createCoordinationApiServer({ designatedVerifierDid: target.adapter.did, relayResponseWaitMs: 5,
+      authorizedRecipientDids: [target.proposer.did], auth: { enforcement: true, audiences: ["https://relay.example.test"] } });
+    apps.push(relay);
+    const pkg = await target.builder.buildFromToolCall("create_issue_mirror", { title: "identity binding" });
+    const envelope = buildDeliveryEnvelope({ sender: target.proposer.did, recipients: [target.adapter.did],
+      payload: { version: "1", type: "ActionRequest", actionPackage: pkg } });
+    expect((await relay.inject({ method: "POST", url: "/mpas/v1/verifier/action", payload: envelope })).statusCode).toBe(401);
+    expect((await signedRelayRequest(relay, "/mpas/v1/verifier/action", envelope, adapterSigner)).statusCode).toBe(403);
+    expect((await signedRelayRequest(relay, "/mpas/v1/verifier/action", envelope, target.proposer, "https://wrong.example.test")).statusCode).toBe(401);
+    for (const altered of [{ ...envelope, sender: target.adapter.did }, { ...envelope, recipients: [target.proposer.did] }]) {
+      expect((await signedRelayRequest(relay, "/mpas/v1/verifier/action", altered, target.proposer)).statusCode).toBe(400);
+      expect((await target.app.inject({ method: "POST", url: "/mpas/v1/verifier/action", payload: altered })).statusCode).toBe(400);
+    }
+    const poll = await signedRelayRequest(relay, "/mpas/v1/relay/poll", { version: "1", type: "RelayPollRequest", did: target.adapter.did }, adapterSigner);
+    expect(poll.json().deliveries).toEqual([]);
+    expect((await signedRelayRequest(relay, "/mpas/v1/verifier/action", envelope,
+      target.proposer, "https://relay.example.test", "single-use-transport-control")).statusCode).toBe(503);
+    expect((await signedRelayRequest(relay, "/mpas/v1/verifier/action", envelope,
+      target.proposer, "https://relay.example.test", "single-use-transport-control")).statusCode).toBe(401);
+    const queued = await signedRelayRequest(relay, "/mpas/v1/relay/poll",
+      { version: "1", type: "RelayPollRequest", did: target.adapter.did }, adapterSigner);
+    expect(queued.json().deliveries).toHaveLength(1);
+    expect(target.credentials).not.toHaveBeenCalled();
+    expect(target.fixture.requests).toEqual([]);
+    expect(target.fixture.toolEffects).toEqual([]);
+    console.log(JSON.stringify({ case: "relay authentication and envelope", negatives: 8, nonceControl: "first queued, reuse rejected",
+      negativeDeliveries: 0, permittedNonceControlDeliveries: 1, credentialReads: 0, targetEffects: 0 }));
+  });
+
+  it("preserves the original strict-default C07 minimum-difference pair and known-plugin governance", async () => {
+    const target = await httpBoundaryTarget();
+    delete target.loaded.config.passThrough;
+    target.loaded.config.policy.defaultRequirement = { type: "threshold", threshold: 2, eligibleSignerGroup: "maintainers" };
+    const pkg = await target.builder.buildFromToolCall("create_issue_mirror", { title: "same signed request" });
+    const request = { method: "POST" as const, url: "/mpas/v1/action", payload: { version: "1", type: "ActionRequest", actionPackage: pkg } };
+    const first = await target.app.inject(request);
+    expect(first.json()).toMatchObject({ result: "rejected", error: { code: "OPERATION_NOT_GOVERNED" } });
+    target.loaded.config.policy.policies = { create_issue_mirror: [] };
+    const second = await target.app.inject(request);
+    expect(second.json()).toMatchObject({ result: "additionalApprovalsRequired" });
+    const known = await target.builder.buildFromToolCall("delete_branch_mirror", { owner: "synthetic", repo: "test", branch: "draft" });
+    const knownRequest = { ...request, payload: { ...request.payload, actionPackage: known } };
+    expect((await target.app.inject(knownRequest)).json()).toMatchObject({ result: "additionalApprovalsRequired" });
+    expect(target.credentials).not.toHaveBeenCalled();
+    expect(target.fixture.requests).toHaveLength(0);
+    for (const key of ["maintainer-a", "maintainer-b"]) {
+      const signer = new ApprovalBuilder({ keyManager: KeyManager.fromJwk((await readJson<KeyFixture>(join(fixturesDir, "test-keys", key + ".json"))).privateJwk) });
+      known.approvalBundle.approvals.push(await signer.buildApproval(known.actionEnvelope, "approve"));
+      pkg.approvalBundle.approvals.push(await signer.buildApproval(pkg.actionEnvelope, "approve"));
+    }
+    expect((await target.app.inject(knownRequest)).json()).toMatchObject({ result: "executed" });
+    expect((await target.app.inject(request)).json()).toMatchObject({ result: "executed" });
+    expect(target.fixture.toolEffects.map(effect => effect.name)).toEqual(["delete_branch_mirror", "create_issue_mirror"]);
+    console.log(JSON.stringify({ case: "C07 exact policy-key difference", ungovernedCalls: 0, emptyPolicyKeyCalls: 0,
+      knownWithoutApprovals: 0, knownWithApprovals: 1, policyNamedWithApprovals: 1 }));
+  });
+
   it("simultaneous direct and verifier requests share one durable grant and target call", async () => {
     const target = await countingTarget();
     const direct = submitFixture(target.app, "valid-no-approval-required.json");

@@ -244,7 +244,7 @@ export function createAdapterApiServer(options: HttpEndpointOptions): FastifyIns
 
     // --- Routing decision: governed vs. pass-through ---
     // If the operation IS in the plugin OR has a policy entry → governance applies.
-    // If the operation is NOT in either → pass-through (skip schema + policy, just proxy credential).
+    // If the operation is NOT in either → deny unless trusted config explicitly allows pass-through.
     if (isGovernedOperation) {
       // Governed path: validate schema (only if in plugin) and evaluate policy.
       if (inPlugin) {
@@ -285,13 +285,9 @@ export function createAdapterApiServer(options: HttpEndpointOptions): FastifyIns
       }
       trace.emit("verification_step", { actionId, step: "policy_evaluation", passed: true, policyStatus: policyResult.status });
     } else {
-      // Pass-through path: operation is not in the plugin and has no policy
-      // entry. Under the plugin-anchored trust model the plugin publisher
-      // defines the governed surface; ungoverned operations execute with the
-      // adapter's credential on the proposer's signature alone, and
-      // defaultRequirement does NOT apply. Power users who want a closed
-      // world instead set passThrough: "deny" in the deployment config.
-      if (loadedConfig.config.passThrough === "deny") {
+      // This reference adapter chooses the profile-permitted closed world.
+      // Only a literal trusted opt-in may bypass the governed-operation default.
+      if (loadedConfig.config.passThrough !== "allow") {
         trace.emit("verification_step", { actionId, step: "routing_decision", passed: false, path: "pass-through", operation: operationName(pkg) });
         return rejection(
           pkg,
@@ -447,6 +443,8 @@ export function classifyDispatch(dispatchResult: McpDispatchResult): {
     case "DISPATCH_TIMEOUT":
     case "PROCESS_EXITED":
     case "TRANSPORT_ERROR":
+    case "OAUTH_AUTHENTICATION_FAILED":
+    case "OAUTH_SCOPE_DEMAND":
       return { result: "indeterminate", error: { code: dispatchResult.error.code, message: dispatchResult.error.message } };
     default:
       return { result: "failed", error: { code: dispatchResult.error.code, message: dispatchResult.error.message } };
@@ -585,6 +583,8 @@ function diagnosticMessage(code: string): string {
       return "The upstream MCP server rejected OAuth authentication. This is not a target outage.";
     case "OAUTH_INVALID_GRANT":
       return "The stored OAuth refresh grant is invalid or revoked. Operator reauthorization is required.";
+    case "OAUTH_SCOPE_DEMAND":
+      return "The upstream MCP server requested more scope after dispatch. No authority was changed or retry made.";
     case "OAUTH_SCOPE_NOT_SUPPORTED":
       return "A configured OAuth scope is not advertised by the authorization server.";
     case "OAUTH_REFRESH_TOKEN_NOT_ISSUED":

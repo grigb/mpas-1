@@ -2,6 +2,7 @@
   "version": "1",
   "type": "MpasAdapterDeploymentConfig",
   "name": "github-auto-approve",
+  "passThrough": "allow",
   "target": {
     "applicationDid": "did:web:github-mirror.example"
   },

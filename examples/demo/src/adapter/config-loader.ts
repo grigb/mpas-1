@@ -71,8 +71,8 @@ export interface DeploymentConfig {
   signerKeys: SignerKey[];
   /**
    * Routing for operations absent from both the plugin and the policy.
-   * "allow" (default) proxies them with the adapter credential on the
-   * proposer's signature alone; "deny" rejects them (fail closed).
+   * Omitted or "deny" rejects them before credential access. Explicit "allow"
+   * proxies them with the adapter credential on the proposer's signature alone.
    */
   passThrough?: "allow" | "deny";
 }

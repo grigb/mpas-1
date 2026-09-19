@@ -5,7 +5,8 @@ export interface OAuthProtectedMcpFixture {
   origin: string;
   resourceUrl: string;
   issuer: string;
-  requests: Array<{ method: string; path: string; authorization?: string }>;
+  requests: Array<{ method: string; path: string; authorization?: string; sessionId?: string; rpcMethod?: string }>;
+  toolEffects: Array<{ name: string; arguments: unknown }>;
   tokenRequests: URLSearchParams[];
   registrationRequests: unknown[];
   revocationRequests: URLSearchParams[];
@@ -27,6 +28,11 @@ export interface OAuthProtectedMcpFixtureOptions {
   authorizationResponseIssuerSupported?: boolean;
   advertiseRevocationEndpoint?: boolean;
   clientMetadataRedirectUri?: string;
+  toolStatus?: 200 | 401 | 403 | 307 | 308;
+  toolStatusByName?: Record<string, 200 | 401 | 403 | 307 | 308>;
+  toolChallenge?: string;
+  toolErrorBody?: string;
+  toolDelayMs?: number;
 }
 
 export async function startOAuthProtectedMcpFixture(
@@ -37,17 +43,20 @@ export async function startOAuthProtectedMcpFixture(
   const registrationRequests: unknown[] = [];
   const revocationRequests: URLSearchParams[] = [];
   const eventOrder: string[] = [];
+  const toolEffects: OAuthProtectedMcpFixture["toolEffects"] = [];
   let origin = "";
   const accessToken = "fixture-access-token";
   const refreshedAccessToken = "fixture-refreshed-access-token";
 
   const server = http.createServer((request, response) => {
     const path = new URL(request.url ?? "/", origin).pathname;
-    requests.push({
+    const recorded: OAuthProtectedMcpFixture["requests"][number] = {
       method: request.method ?? "GET",
       path,
       authorization: request.headers.authorization,
-    });
+      sessionId: request.headers["mcp-session-id"] as string | undefined,
+    };
+    requests.push(recorded);
 
     if (path === "/.well-known/oauth-protected-resource/mcp") {
       return json(response, 200, {
@@ -172,15 +181,17 @@ export async function startOAuthProtectedMcpFixture(
       return;
     }
 
-    if (path === "/mcp" && request.method === "POST") {
+    if ((path === "/mcp" || path === "/redirect-target") && request.method === "POST") {
       return readBody(request, (body) => {
         const message = JSON.parse(body);
+        recorded.rpcMethod = message.method;
         if (message.method === "notifications/initialized") {
           response.statusCode = 202;
           response.end();
           return;
         }
         if (message.method === "initialize") {
+          response.setHeader("mcp-session-id", "fixture-initial-session");
           return json(response, 200, {
             jsonrpc: "2.0",
             id: message.id,
@@ -190,6 +201,25 @@ export async function startOAuthProtectedMcpFixture(
               serverInfo: { name: "oauth-fixture", version: "1.0.0" },
             },
           });
+        }
+        if (message.method === "tools/call") {
+          // A real local target effect occurs before the chosen response. An
+          // authentication failure cannot prove the operation did not execute.
+          toolEffects.push({ name: message.params.name, arguments: message.params.arguments });
+          const status = options.toolStatusByName?.[message.params.name] ?? options.toolStatus ?? 200;
+          if (status !== 200) {
+            const reject = () => {
+              response.statusCode = status;
+              response.setHeader("mcp-session-id", "hostile-replacement-session");
+              response.setHeader("WWW-Authenticate", options.toolChallenge ??
+                `Bearer error="insufficient_scope", scope="mcp:tools admin", resource_metadata="${origin}/.well-known/oauth-protected-resource/mcp"`);
+              if (status === 307 || status === 308) response.setHeader("Location", `${origin}/redirect-target`);
+              response.end(options.toolErrorBody ?? "hostile upstream error body");
+            };
+            if (options.toolDelayMs) setTimeout(reject, options.toolDelayMs);
+            else reject();
+            return;
+          }
         }
         return json(response, 200, {
           jsonrpc: "2.0",
@@ -215,6 +245,7 @@ export async function startOAuthProtectedMcpFixture(
     resourceUrl: `${origin}/mcp`,
     issuer: `${origin}/issuer`,
     requests,
+    toolEffects,
     tokenRequests,
     registrationRequests,
     revocationRequests,
