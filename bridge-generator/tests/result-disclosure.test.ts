@@ -2,12 +2,14 @@ import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { runGenerate } from "../src/generate.js";
+import { loadMpasSdkVersion, runGenerate } from "../src/generate.js";
 import {
   ResultDisclosureError,
   parseResultDisclosurePolicy,
 } from "../src/result-disclosure.js";
 import type { UpstreamInfo } from "../src/types.js";
+
+const mpasVersion = await loadMpasSdkVersion();
 
 const tools = ["credential_tool", "ordinary_tool", "__proto__", "constructor"];
 
@@ -112,6 +114,7 @@ describe("generation input gate", () => {
       upstreamArgs: [],
       discover: async () => upstream,
       log: () => {},
+      mpasVersion,
     })).rejects.toThrow(ResultDisclosureError);
     expect(await readdir(root)).toEqual([]);
     await expect(readFile(appDir)).rejects.toThrow();
@@ -134,6 +137,7 @@ describe("generation input gate", () => {
       upstreamArgs: [],
       discover: async () => upstream,
       log: () => {},
+      mpasVersion,
     })).rejects.toThrow(ResultDisclosureError);
 
     expect(await Promise.all([readFile(sentinel, "utf8"), readdir(root)])).toEqual(before);
