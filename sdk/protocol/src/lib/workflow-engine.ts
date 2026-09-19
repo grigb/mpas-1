@@ -105,6 +105,10 @@ export interface BridgeWorkflowEngineOptions {
    * {@link DEFAULT_CLAIM_LEASE_MS}.
    */
   claimLeaseMs?: number;
+  /** Initial delay before retrying a temporary policyUnavailable response. Default 1s. */
+  policyUnavailableInitialRetryMs?: number;
+  /** Maximum delay between policyUnavailable retries. Default 60s. */
+  policyUnavailableMaxRetryMs?: number;
   now?: () => number;
 }
 
@@ -120,6 +124,19 @@ export type ProposeResult =
 /** Ledger rejection codes that mean "already dispatched; outcome not retrievable". */
 const REPLAY_CODES = new Set(["REPLAY_DETECTED", "ACTION_ID_HASH_MISMATCH"]);
 
+const DEFAULT_POLICY_UNAVAILABLE_INITIAL_RETRY_MS = 1_000;
+const DEFAULT_POLICY_UNAVAILABLE_MAX_RETRY_MS = 60_000;
+
+type PolicyUnavailableRetryPhase = "initial" | "completed";
+
+interface PolicyUnavailableRetryAttempt {
+  stage: PolicyUnavailableRetryPhase;
+  outcome: "policyUnavailable";
+  retryAfterMs: number;
+  retryAt: string;
+  at: string;
+}
+
 export class BridgeWorkflowEngine {
   private readonly store: WorkflowStore;
   private readonly actionEndpoint: WorkflowActionEndpoint;
@@ -128,6 +145,8 @@ export class BridgeWorkflowEngine {
   private readonly proposerDid: Did;
   private readonly workerId: string;
   private readonly claimLeaseMs: number;
+  private readonly policyUnavailableInitialRetryMs: number;
+  private readonly policyUnavailableMaxRetryMs: number;
   private readonly now: () => number;
   private readonly waiters = new Map<string, Set<(record: WorkflowRecord) => void>>();
   /**
@@ -175,6 +194,18 @@ export class BridgeWorkflowEngine {
       throw new Error(
         `claimLeaseMs (${this.claimLeaseMs}) must exceed submissionTimeoutMs (${submissionTimeoutMs}).`,
       );
+    }
+    this.policyUnavailableInitialRetryMs =
+      options.policyUnavailableInitialRetryMs ?? DEFAULT_POLICY_UNAVAILABLE_INITIAL_RETRY_MS;
+    this.policyUnavailableMaxRetryMs =
+      options.policyUnavailableMaxRetryMs ?? DEFAULT_POLICY_UNAVAILABLE_MAX_RETRY_MS;
+    if (
+      !Number.isFinite(this.policyUnavailableInitialRetryMs) ||
+      this.policyUnavailableInitialRetryMs <= 0 ||
+      !Number.isFinite(this.policyUnavailableMaxRetryMs) ||
+      this.policyUnavailableMaxRetryMs < this.policyUnavailableInitialRetryMs
+    ) {
+      throw new Error("policyUnavailable retry delays must be finite and max must be at least the positive initial delay.");
     }
     this.now = options.now ?? (() => Date.now());
   }
@@ -322,6 +353,11 @@ export class BridgeWorkflowEngine {
         this.store.saveLastActionResponse(record.taskId, response);
         this.store.compareAndSetState(record.taskId, "created", "awaitingVerifierResult");
         return { kind: "deferred", record: this.mustGet(record.taskId) };
+      case "policyUnavailable":
+        return {
+          kind: "deferred",
+          record: this.deferForPolicyUnavailable(record.taskId, response, "initial"),
+        };
       default:
         return this.settle(record.taskId, response);
     }
@@ -476,6 +512,7 @@ export class BridgeWorkflowEngine {
       this.store
         .listRecoverableWorkflows()
         .filter((record) => record.state !== "awaitingApprovals")
+        .filter((record) => record.state !== "policyUnavailable" || this.policyUnavailableRetryIsDue(record))
         .map((record) => this.dispatchClaimable(record)),
     );
   }
@@ -497,9 +534,13 @@ export class BridgeWorkflowEngine {
         case "readyForSubmission":
         case "submittingToVerifier":
         case "awaitingVerifierResult":
+        case "policyUnavailable":
           break;
         default:
           return;
+      }
+      if (current.state === "policyUnavailable" && !this.policyUnavailableRetryIsDue(current)) {
+        return;
       }
       if (!this.store.claimWorkflow(current.taskId, this.workerId, this.claimLeaseMs)) {
         return;
@@ -516,6 +557,9 @@ export class BridgeWorkflowEngine {
         case "submittingToVerifier":
         case "awaitingVerifierResult":
           await this.submitCompleted(claimed);
+          break;
+        case "policyUnavailable":
+          await this.retryPolicyUnavailable(claimed);
           break;
       }
     });
@@ -570,6 +614,11 @@ export class BridgeWorkflowEngine {
       return;
     }
 
+    if (response.result === "policyUnavailable") {
+      this.deferForPolicyUnavailable(record.taskId, response, "completed");
+      return;
+    }
+
     if (response.result === "rejected" && REPLAY_CODES.has(response.error?.code ?? "")) {
       this.resolveUnresolvable(
         record.taskId,
@@ -590,6 +639,57 @@ export class BridgeWorkflowEngine {
     }
 
     this.settle(record.taskId, response);
+  }
+
+  private deferForPolicyUnavailable(
+    taskId: string,
+    response: ActionResponse,
+    phase: PolicyUnavailableRetryPhase,
+  ): WorkflowRecord {
+    this.store.saveLastActionResponse(taskId, response);
+    const current = this.mustGet(taskId);
+    if (isTerminal(current)) {
+      return current;
+    }
+
+    const retryNumber = current.adapterAttempts.filter(isPolicyUnavailableRetryAttempt).length;
+    const retryAfterMs = Math.min(
+      this.policyUnavailableMaxRetryMs,
+      this.policyUnavailableInitialRetryMs * 2 ** Math.min(retryNumber, 31),
+    );
+    const at = this.now();
+    const retryAttempt: PolicyUnavailableRetryAttempt = {
+      stage: phase,
+      outcome: "policyUnavailable",
+      retryAfterMs,
+      retryAt: new Date(at + retryAfterMs).toISOString(),
+      at: new Date(at).toISOString(),
+    };
+    this.store.saveAdapterAttempt(taskId, retryAttempt);
+    this.store.compareAndSetState(taskId, current.state, "policyUnavailable");
+    return this.mustGet(taskId);
+  }
+
+  private policyUnavailableRetryIsDue(record: WorkflowRecord): boolean {
+    const retry = [...record.adapterAttempts].reverse().find(isPolicyUnavailableRetryAttempt);
+    return retry === undefined || Date.parse(retry.retryAt) <= this.now();
+  }
+
+  private async retryPolicyUnavailable(record: WorkflowRecord): Promise<void> {
+    if (!this.policyUnavailableRetryIsDue(record)) {
+      return;
+    }
+
+    if (record.completedPackage === undefined) {
+      if (this.store.compareAndSetState(record.taskId, "policyUnavailable", "created")) {
+        await this.submitInitial(this.mustGet(record.taskId));
+      }
+      return;
+    }
+
+    if (this.store.compareAndSetState(record.taskId, "policyUnavailable", "readyForSubmission")) {
+      await this.submitCompleted(this.mustGet(record.taskId));
+    }
   }
 
   private settle(taskId: string, response: ActionResponse): ProposeResult {
@@ -714,6 +814,21 @@ function asActionResponse(value: unknown): ActionResponse | undefined {
   return candidate.type === "ActionResponse" && typeof candidate.result === "string"
     ? (candidate as ActionResponse)
     : undefined;
+}
+
+function isPolicyUnavailableRetryAttempt(value: unknown): value is PolicyUnavailableRetryAttempt {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const candidate = value as Partial<PolicyUnavailableRetryAttempt>;
+  return (
+    (candidate.stage === "initial" || candidate.stage === "completed") &&
+    candidate.outcome === "policyUnavailable" &&
+    typeof candidate.retryAfterMs === "number" &&
+    Number.isFinite(candidate.retryAfterMs) &&
+    candidate.retryAfterMs > 0 &&
+    typeof candidate.retryAt === "string" &&
+    Number.isFinite(Date.parse(candidate.retryAt)) &&
+    typeof candidate.at === "string"
+  );
 }
 
 function permanentCoordinationFailure(error: unknown): boolean {
