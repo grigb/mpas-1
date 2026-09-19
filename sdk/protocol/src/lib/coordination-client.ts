@@ -20,6 +20,9 @@ import { strictJsonParse } from "../utils/strict-json.js";
 import {
   parseActionResponseEnvelope,
   parseCoordinationPollResponse,
+  parseActionReference,
+  requireTimestamp,
+  RoutingValidationError,
   parseCoordinationSessionResponse,
   parseCoordinationWorkAvailable,
   parseRelayDeliveryResponse,
@@ -525,38 +528,17 @@ function parseCoordinationApprovalResponse(value: unknown): CoordinationApproval
   if (!COORDINATION_APPROVAL_STATES.has(response.state as string)) {
     throw new CoordinationResponseError("Coordination Approval response contains an invalid workflow state.");
   }
-  if (
-    typeof response.createdAt !== "string" || !Number.isFinite(Date.parse(response.createdAt))
-  ) {
-    throw new CoordinationResponseError("Coordination Approval response contains an invalid createdAt timestamp.");
-  }
-  if (!isActionReference(response.actionRef)) {
-    throw new CoordinationResponseError("Coordination Approval response contains an invalid Action reference.");
+  try {
+    requireTimestamp(response.createdAt, "$.createdAt");
+    parseActionReference(response.actionRef, "$.actionRef");
+  } catch (error) {
+    if (!(error instanceof RoutingValidationError)) throw error;
+    throw new CoordinationResponseError("Coordination Approval response contains invalid timestamp or Action reference metadata.");
   }
   if (Object.keys(response).some((member) => !COORDINATION_APPROVAL_RESPONSE_MEMBERS.has(member))) {
     throw new CoordinationResponseError("Coordination Approval response contains an undeclared member.");
   }
   return response as unknown as CoordinationApprovalResponse;
-}
-
-function isActionReference(value: unknown): boolean {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const reference = value as Record<string, unknown>;
-  const actionId = reference.actionId;
-  const hash = reference.actionEnvelopeHash;
-  return (
-    reference.version === "1" &&
-    reference.type === "ActionRef" &&
-    typeof actionId === "object" &&
-    actionId !== null &&
-    !Array.isArray(actionId) &&
-    typeof (actionId as Record<string, unknown>).value === "string" &&
-    typeof hash === "object" &&
-    hash !== null &&
-    !Array.isArray(hash) &&
-    (hash as Record<string, unknown>).alg === "sha-256" &&
-    typeof (hash as Record<string, unknown>).value === "string"
-  );
 }
 
 function approvalSignerDid(approval: Approval): Did {

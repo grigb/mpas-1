@@ -652,11 +652,6 @@ function buildActionUpdate(stored: StoredAction): ActionUpdate {
 
   if (stored.state === "rejected") {
     update.rejectedAt = stored.rejectedAt;
-    return update;
-  }
-
-  if (stored.state === "expired") {
-    return update;
   }
 
   update.progress = progressFor(stored.authorizationRequirements.approvalRequirements, stored.approvals);

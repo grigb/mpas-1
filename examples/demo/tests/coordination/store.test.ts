@@ -2,8 +2,8 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { CompactSign, importJWK, type JWK } from "jose";
 import { canonicalize } from "json-canonicalize";
-import { describe, expect, it } from "vitest";
-import { buildDeliveryEnvelope } from "@oma3/mpas";
+import { describe, expect, it, vi } from "vitest";
+import { buildDeliveryEnvelope, parseCoordinationPollResponse } from "@oma3/mpas";
 import { CoordinationStore, MpasServiceError } from "../../src/coordination/store.js";
 import type { CoordinationActionRequest } from "../../src/coordination/types.js";
 import type { ActionPackage, Approval, Decision, Did, Hash } from "../../src/core/types.js";
@@ -37,6 +37,7 @@ describe("CoordinationStore", () => {
       state: "awaitingApprovals",
       expiresAt: request.actionPackage.actionEnvelope.expiresAt,
     });
+    expect(parseCoordinationPollResponse(proposerPoll)).toEqual(proposerPoll);
     expect(outsiderPoll.approvalRequests).toHaveLength(0);
   });
 
@@ -97,7 +98,9 @@ describe("CoordinationStore", () => {
       actionEnvelopeHash: request.authorizationRequirements.actionEnvelopeHash,
       approval: await signApproval(request.authorizationRequirements.actionEnvelopeHash, maintainerB, "approve"),
     });
-    const readyUpdate = store.poll(request.actionPackage.actionEnvelope.proposer.did).actionUpdates[0];
+    const readyPoll = store.poll(request.actionPackage.actionEnvelope.proposer.did);
+    const readyUpdate = readyPoll.actionUpdates[0];
+    expect(parseCoordinationPollResponse(readyPoll)).toEqual(readyPoll);
 
     expect(ready.state).toBe("readyForSubmission");
     expect(readyUpdate.state).toBe("readyForSubmission");
@@ -159,12 +162,32 @@ describe("CoordinationStore", () => {
       actionEnvelopeHash: request.authorizationRequirements.actionEnvelopeHash,
       approval: await signApproval(request.authorizationRequirements.actionEnvelopeHash, maintainerA, "reject"),
     });
-    const update = store.poll(request.actionPackage.actionEnvelope.proposer.did).actionUpdates[0];
+    const poll = store.poll(request.actionPackage.actionEnvelope.proposer.did);
+    const update = poll.actionUpdates[0];
 
     expect(response.state).toBe("rejected");
     expect(update).toMatchObject({ state: "rejected" });
     expect(update.rejectedAt).toBeDefined();
+    expect(update.expiresAt).toBe(request.actionPackage.actionEnvelope.expiresAt);
+    expect(update.progress).toEqual({ required: 2, collected: 0, pending: [(await fixtureKey("maintainer-b")).did] });
+    expect(parseCoordinationPollResponse(poll)).toEqual(poll);
     expect(store.poll((await fixtureKey("maintainer-b")).did).approvalRequests).toHaveLength(0);
+  });
+
+  it("preserves expiry and progress in an expired response accepted by the public parser", async () => {
+    const request = await coordinationActionRequest();
+    const store = new CoordinationStore();
+    store.createWorkflow(request);
+    const currentTime = new Date();
+    try {
+      vi.setSystemTime(new Date(Date.parse(request.actionPackage.actionEnvelope.expiresAt) + 1));
+      const poll = store.poll(request.actionPackage.actionEnvelope.proposer.did);
+      expect(poll.actionUpdates[0]).toMatchObject({ state: "expired", expiresAt: request.actionPackage.actionEnvelope.expiresAt,
+        progress: { required: 2, collected: 0, pending: [(await fixtureKey("maintainer-a")).did, (await fixtureKey("maintainer-b")).did] } });
+      expect(parseCoordinationPollResponse(poll)).toEqual(poll);
+    } finally {
+      vi.setSystemTime(currentTime);
+    }
   });
 
   it("rejects invalid requirements and Action Package bindings before workflow creation", async () => {
@@ -279,6 +302,10 @@ describe("CoordinationStore", () => {
       state: "cancelled",
       expiresAt: request.actionPackage.actionEnvelope.expiresAt,
     });
+    const cancelledPoll = store.poll(request.actionPackage.actionEnvelope.proposer.did);
+    expect(cancelledPoll.actionUpdates[0].progress).toBeUndefined();
+    expect(cancelledPoll.actionUpdates[0].actionPackage).toBeUndefined();
+    expect(parseCoordinationPollResponse(cancelledPoll)).toEqual(cancelledPoll);
     expect(() =>
       store.submitApproval({
         version: "1",
