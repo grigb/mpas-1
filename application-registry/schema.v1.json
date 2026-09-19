@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oma3.org/mpas/application-registry/schema.v1.json",
+  "title": "MPAS Application Registry Entry (v1)",
+  "description": "Machine-readable publish contract for application-registry entries. v1 covers MCP integrations (protocol \"mcp\"); future protocols define their own upstream object formats in a later schema version. Publishable entries only: generator drafts carrying a top-level \"draft\" marker are rejected (no such member is declared).",
+  "type": "object",
+  "required": ["version", "application", "native", "protocol", "plugin", "publisher", "status"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "const": "1" },
+    "application": {
+      "type": "object",
+      "required": ["name", "description", "applicationDid"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "description": { "type": "string", "minLength": 1 },
+        "applicationDid": { "$ref": "#/$defs/did" },
+        "website": { "$ref": "#/$defs/httpsUrl" }
+      }
+    },
+    "native": { "type": "boolean" },
+    "protocol": { "const": "mcp" },
+    "upstream": {
+      "type": "object",
+      "required": ["name", "protocolVersion"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "protocolVersion": { "type": "string", "minLength": 1 },
+        "repository": { "$ref": "#/$defs/httpsUrl" },
+        "distributionUrl": { "$ref": "#/$defs/httpsUrl" },
+        "package": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional v1 compatibility field: legacy npm package name of the upstream server. New entries should use repository/distributionUrl instead."
+        },
+        "toolSurface": {
+          "type": "object",
+          "required": ["alg", "value"],
+          "additionalProperties": false,
+          "properties": {
+            "alg": { "const": "sha-256" },
+            "value": { "$ref": "#/$defs/base64urlSha256Digest" }
+          }
+        }
+      }
+    },
+    "plugin": {
+      "type": "object",
+      "required": ["repository"],
+      "additionalProperties": false,
+      "properties": {
+        "repository": { "$ref": "#/$defs/httpsUrl" },
+        "pluginDid": { "$ref": "#/$defs/did" },
+        "artifactDid": { "$ref": "#/$defs/did" }
+      }
+    },
+    "publisher": {
+      "type": "object",
+      "required": ["name", "githubOrg"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "githubOrg": { "type": "string", "minLength": 1 },
+        "publisherDid": { "$ref": "#/$defs/did" },
+        "repository": { "$ref": "#/$defs/httpsUrl" }
+      }
+    },
+    "status": { "enum": ["active", "beta", "planned", "deprecated"] }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "native": { "const": false } },
+        "required": ["native"]
+      },
+      "then": { "required": ["upstream"] },
+      "else": { "not": { "required": ["upstream"] } }
+    }
+  ],
+  "$defs": {
+    "did": {
+      "type": "string",
+      "pattern": "^did:[a-z0-9]+:.+$"
+    },
+    "httpsUrl": {
+      "type": "string",
+      "pattern": "^https://.+$"
+    },
+    "base64urlSha256Digest": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{43}$"
+    }
+  }
+}

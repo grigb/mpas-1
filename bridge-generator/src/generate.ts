@@ -49,6 +49,10 @@ export interface OrgConfig {
     applicationDid: string;
     website?: string;
   };
+  /** Optional publish location of the generated plugin.json. */
+  plugin?: {
+    repository?: string;
+  };
 }
 
 export interface GenerateOptions {
@@ -162,10 +166,18 @@ export async function runGenerate(options: GenerateOptions): Promise<void> {
   await writeGenerated("harness-config.json", jsonFile(harnessConfig));
 
   // --- registry-entry.json ---
+  // Publishable only when every publish field is real: no draft marker and full
+  // validation against application-registry/schema.v1.json before writing. While
+  // any generated placeholder remains the file is an explicit nonpublishable draft.
   const registryEntry = buildRegistryEntry(options.appName, upstream, plugin, snapshot.toolSurface, orgConfig);
-  validateRegistryEntry(registryEntry);
   registryEntry.plugin.artifactDid = await computeArtifactDid(plugin);
-  await writeGenerated("registry-entry.json", jsonFile(registryEntry));
+  if (containsPlaceholder(registryEntry)) {
+    await writeGenerated("registry-entry.json", jsonFile({ ...registryEntry, draft: true }));
+    log("registry-entry.json is a nonpublishable draft (generated placeholders remain); it is not valid against application-registry/schema.v1.json.");
+  } else {
+    validateRegistryEntry(registryEntry, plugin.applicationDid);
+    await writeGenerated("registry-entry.json", jsonFile(registryEntry));
+  }
 
   // --- bridge/ ---
   await writeGenerated("bridge/src/index.ts", generateBridge(upstream, disclosure.disclosureMap));
@@ -230,7 +242,7 @@ function buildRegistryEntry(
       toolSurface,
     },
     plugin: {
-      repository: "PLACEHOLDER: URL to the published plugin.json",
+      repository: orgConfig?.plugin?.repository ?? "PLACEHOLDER: URL to the published plugin.json",
     },
     publisher: orgConfig
       ? { ...orgConfig.publisher }
@@ -239,17 +251,205 @@ function buildRegistryEntry(
   };
 }
 
-/** Minimal validation against application-registry/README.md schema v1. */
-function validateRegistryEntry(entry: RegistryEntry): void {
-  const missing: string[] = [];
-  if (!entry.application.name) missing.push("application.name");
-  if (!entry.application.description) missing.push("application.description");
-  if (!entry.application.applicationDid) missing.push("application.applicationDid");
-  if (!entry.plugin.repository) missing.push("plugin.repository");
-  if (!entry.publisher.name) missing.push("publisher.name");
-  if (!entry.publisher.githubOrg) missing.push("publisher.githubOrg");
-  if (missing.length > 0) {
-    throw new GenerateError(`Registry entry is missing required fields: ${missing.join(", ")}`);
+/**
+ * Dependency-free evaluator for the application-registry v1 publish contract
+ * (`application-registry/schema.v1.json`). The checked-in JSON Schema is the
+ * external machine contract; this evaluator must agree with it for every
+ * constraint. `expectedApplicationDid`, when given, additionally binds the
+ * entry to the generated plugin's `applicationDid` — a cross-field equality
+ * the schema cannot express.
+ */
+export function checkRegistryEntryV1(value: unknown, expectedApplicationDid?: string): RegistryValidationIssue[] {
+  const issues: RegistryValidationIssue[] = [];
+  const fail = (path: string, message: string): void => {
+    issues.push({ path, message });
+  };
+  if (!isPlainObject(value)) {
+    fail("$", "entry must be an object.");
+    return issues;
+  }
+
+  checkExactMembers(value, ["version", "application", "native", "protocol", "upstream", "plugin", "publisher", "status"], "$", fail);
+  requireMembers(value, ["version", "application", "native", "protocol", "plugin", "publisher", "status"], "$", fail);
+
+  if ("version" in value && value.version !== "1") {
+    fail("$.version", 'version must be exactly "1".');
+  }
+  if ("native" in value && typeof value.native !== "boolean") {
+    fail("$.native", "native must be a boolean.");
+  }
+  if ("protocol" in value && value.protocol !== "mcp") {
+    fail("$.protocol", 'protocol must be "mcp" (schema v1 covers MCP integrations only).');
+  }
+  if ("status" in value && !REGISTRY_STATUS_VOCABULARY.has(value.status as string)) {
+    fail("$.status", `status must be one of: ${[...REGISTRY_STATUS_VOCABULARY].join(", ")}.`);
+  }
+
+  if ("application" in value) {
+    const application = value.application;
+    if (!isPlainObject(application)) {
+      fail("$.application", "application must be an object.");
+    } else {
+      checkExactMembers(application, ["name", "description", "applicationDid", "website"], "$.application", fail);
+      requireMembers(application, ["name", "description", "applicationDid"], "$.application", fail);
+      checkNonEmptyString(application.name, "$.application.name", fail);
+      checkNonEmptyString(application.description, "$.application.description", fail);
+      checkDid(application.applicationDid, "$.application.applicationDid", fail);
+      if ("website" in application) checkHttpsUrl(application.website, "$.application.website", fail);
+    }
+  }
+
+  if ("plugin" in value) {
+    const plugin = value.plugin;
+    if (!isPlainObject(plugin)) {
+      fail("$.plugin", "plugin must be an object.");
+    } else {
+      checkExactMembers(plugin, ["repository", "pluginDid", "artifactDid"], "$.plugin", fail);
+      requireMembers(plugin, ["repository"], "$.plugin", fail);
+      checkHttpsUrl(plugin.repository, "$.plugin.repository", fail);
+      if ("pluginDid" in plugin) checkDid(plugin.pluginDid, "$.plugin.pluginDid", fail);
+      if ("artifactDid" in plugin) checkDid(plugin.artifactDid, "$.plugin.artifactDid", fail);
+    }
+  }
+
+  if ("publisher" in value) {
+    const publisher = value.publisher;
+    if (!isPlainObject(publisher)) {
+      fail("$.publisher", "publisher must be an object.");
+    } else {
+      checkExactMembers(publisher, ["name", "githubOrg", "publisherDid", "repository"], "$.publisher", fail);
+      requireMembers(publisher, ["name", "githubOrg"], "$.publisher", fail);
+      checkNonEmptyString(publisher.name, "$.publisher.name", fail);
+      checkNonEmptyString(publisher.githubOrg, "$.publisher.githubOrg", fail);
+      if ("publisherDid" in publisher) checkDid(publisher.publisherDid, "$.publisher.publisherDid", fail);
+      if ("repository" in publisher) checkHttpsUrl(publisher.repository, "$.publisher.repository", fail);
+    }
+  }
+
+  const upstream = value.upstream;
+  if (value.native === false) {
+    if (!("upstream" in value)) {
+      fail("$.upstream", "upstream is required when native is false.");
+    }
+  } else if (value.native === true && "upstream" in value) {
+    fail("$.upstream", "upstream must be absent when native is true.");
+  }
+  if ("upstream" in value) {
+    if (!isPlainObject(upstream)) {
+      fail("$.upstream", "upstream must be an object.");
+    } else {
+      checkExactMembers(upstream, ["name", "protocolVersion", "repository", "distributionUrl", "package", "toolSurface"], "$.upstream", fail);
+      requireMembers(upstream, ["name", "protocolVersion"], "$.upstream", fail);
+      checkNonEmptyString(upstream.name, "$.upstream.name", fail);
+      checkNonEmptyString(upstream.protocolVersion, "$.upstream.protocolVersion", fail);
+      if ("repository" in upstream) checkHttpsUrl(upstream.repository, "$.upstream.repository", fail);
+      if ("distributionUrl" in upstream) checkHttpsUrl(upstream.distributionUrl, "$.upstream.distributionUrl", fail);
+      if ("package" in upstream) checkNonEmptyString(upstream.package, "$.upstream.package", fail);
+      if ("toolSurface" in upstream) {
+        const toolSurface = upstream.toolSurface;
+        if (!isPlainObject(toolSurface)) {
+          fail("$.upstream.toolSurface", "toolSurface must be an object.");
+        } else {
+          checkExactMembers(toolSurface, ["alg", "value"], "$.upstream.toolSurface", fail);
+          requireMembers(toolSurface, ["alg", "value"], "$.upstream.toolSurface", fail);
+          if ("alg" in toolSurface && toolSurface.alg !== "sha-256") {
+            fail("$.upstream.toolSurface.alg", 'toolSurface.alg must be "sha-256".');
+          }
+          if (
+            "value" in toolSurface &&
+            (typeof toolSurface.value !== "string" || !BASE64URL_SHA256_PATTERN.test(toolSurface.value))
+          ) {
+            fail("$.upstream.toolSurface.value", "toolSurface.value must be a 43-character base64url SHA-256 digest.");
+          }
+        }
+      }
+    }
+  }
+
+  if (expectedApplicationDid !== undefined && isPlainObject(value.application)) {
+    if (value.application.applicationDid !== expectedApplicationDid) {
+      fail(
+        "$.application.applicationDid",
+        `application.applicationDid must equal the generated plugin's applicationDid (${expectedApplicationDid}).`,
+      );
+    }
+  }
+
+  return issues;
+}
+
+export interface RegistryValidationIssue {
+  path: string;
+  message: string;
+}
+
+const REGISTRY_STATUS_VOCABULARY = new Set(["active", "beta", "planned", "deprecated"]);
+const REGISTRY_DID_PATTERN = /^did:[a-z0-9]+:.+$/;
+const REGISTRY_HTTPS_URL_PATTERN = /^https:\/\/.+$/;
+const BASE64URL_SHA256_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+
+type RegistryIssueSink = (path: string, message: string) => void;
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function checkExactMembers(object: Record<string, unknown>, allowed: string[], path: string, fail: RegistryIssueSink): void {
+  const declared = new Set(allowed);
+  for (const key of Object.keys(object)) {
+    if (!declared.has(key)) {
+      fail(path, `undeclared member ${key}.`);
+    }
+  }
+}
+
+function requireMembers(object: Record<string, unknown>, required: string[], path: string, fail: RegistryIssueSink): void {
+  for (const key of required) {
+    if (!(key in object)) {
+      fail(path, `missing required member ${key}.`);
+    }
+  }
+}
+
+function checkNonEmptyString(value: unknown, path: string, fail: RegistryIssueSink): void {
+  if (typeof value !== "string" || value.length === 0) {
+    fail(path, "must be a non-empty string.");
+  }
+}
+
+function checkDid(value: unknown, path: string, fail: RegistryIssueSink): void {
+  if (typeof value !== "string" || !REGISTRY_DID_PATTERN.test(value)) {
+    fail(path, "must be a syntactically valid DID (did:<method>:<method-specific-id>).");
+  }
+}
+
+function checkHttpsUrl(value: unknown, path: string, fail: RegistryIssueSink): void {
+  if (typeof value !== "string" || !REGISTRY_HTTPS_URL_PATTERN.test(value)) {
+    fail(path, "must be an HTTPS URL.");
+  }
+}
+
+/** True when any generated placeholder string remains anywhere in the entry. */
+function containsPlaceholder(value: unknown): boolean {
+  if (typeof value === "string") {
+    return value.includes("PLACEHOLDER");
+  }
+  if (Array.isArray(value)) {
+    return value.some(containsPlaceholder);
+  }
+  if (isPlainObject(value)) {
+    return Object.values(value).some(containsPlaceholder);
+  }
+  return false;
+}
+
+/** Publish gate: throw unless the entry fully satisfies the v1 publish contract. */
+export function validateRegistryEntry(entry: unknown, expectedApplicationDid?: string): void {
+  const issues = checkRegistryEntryV1(entry, expectedApplicationDid);
+  if (issues.length > 0) {
+    throw new GenerateError(
+      `Registry entry is not publishable under application-registry/schema.v1.json:\n${issues.map((issue) => `  ${issue.path}: ${issue.message}`).join("\n")}`,
+    );
   }
 }
 

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { GenerateError, runGenerate, type GenerateOptions } from "../src/generate.js";
+import { GenerateError, checkRegistryEntryV1, runGenerate, validateRegistryEntry, type GenerateOptions } from "../src/generate.js";
 
 const mockServer = fileURLToPath(new URL("./fixtures/mock-mcp-server.mjs", import.meta.url));
 
@@ -282,6 +282,164 @@ describe("runGenerate", () => {
     const appDir = await generate();
     await writeFile(join(appDir, "plugin.json"), "{ not-json");
     await expect(generate({ outDir: join(appDir, "..") })).rejects.toThrow(/Unable to parse existing/);
+  });
+});
+
+describe("registry entry publish contract (N34)", () => {
+  const realOrgConfig = {
+    publisher: { name: "Wivity", githubOrg: "wivity", publisherDid: "did:web:wivity.example" },
+    application: {
+      name: "Mock App",
+      description: "MPAS-protected mock application.",
+      applicationDid: "did:web:mock.example",
+      website: "https://mock.example",
+    },
+    plugin: { repository: "https://registry.example/applications/mockapp/plugin.json" },
+  };
+
+  async function generateWithOrg(orgConfig: unknown): Promise<{ appDir: string; logs: string[] }> {
+    const outDir = await mkdtemp(join(tmpdir(), "bridge-gen-registry-"));
+    const orgConfigPath = join(outDir, "org.json");
+    await writeFile(orgConfigPath, JSON.stringify(orgConfig));
+    const logs: string[] = [];
+    const appDir = await generate({ outDir, orgConfigPath, log: (message) => logs.push(message) });
+    return { appDir, logs };
+  }
+
+  it("marks the entry as an explicit nonpublishable draft while placeholders remain", async () => {
+    const logs: string[] = [];
+    const appDir = await generate({ log: (message) => logs.push(message) });
+    const entry = await readJson<Record<string, unknown>>(join(appDir, "registry-entry.json"));
+
+    expect(entry.draft).toBe(true);
+    expect(logs.join("\n")).toContain("nonpublishable draft");
+    // The draft marker itself is rejected by the publish contract.
+    expect(checkRegistryEntryV1(entry).some((issue) => issue.message.includes("draft"))).toBe(true);
+    // Without the marker the placeholder entry is still not publishable (DID-shaped placeholder is a DID, but placeholder repository URL is not HTTPS).
+    const { draft: _draft, ...withoutMarker } = entry;
+    expect(checkRegistryEntryV1(withoutMarker).length).toBeGreaterThan(0);
+  });
+
+  it("marks the entry as a draft when the org config omits the plugin repository", async () => {
+    const { appDir } = await generateWithOrg({
+      publisher: realOrgConfig.publisher,
+      application: realOrgConfig.application,
+    });
+    const entry = await readJson<Record<string, unknown>>(join(appDir, "registry-entry.json"));
+    expect(entry.draft).toBe(true);
+  });
+
+  it("publishes without a draft marker once every publish field is real", async () => {
+    const { appDir, logs } = await generateWithOrg(realOrgConfig);
+    const entry = await readJson<Record<string, unknown>>(join(appDir, "registry-entry.json"));
+    const plugin = await readJson<{ applicationDid: string }>(join(appDir, "plugin.json"));
+
+    expect("draft" in entry).toBe(false);
+    expect(logs.join("\n")).not.toContain("nonpublishable draft");
+    expect(checkRegistryEntryV1(entry, plugin.applicationDid)).toEqual([]);
+    expect((entry.application as { applicationDid: string }).applicationDid).toBe(plugin.applicationDid);
+    expect((entry.plugin as { repository: string }).repository).toBe("https://registry.example/applications/mockapp/plugin.json");
+    validateRegistryEntry(entry, plugin.applicationDid);
+  });
+
+  it("rejects malformed publish fields before writing the entry", async () => {
+    const malformed = {
+      publisher: {
+        name: "probe",
+        githubOrg: "not a github organization",
+        publisherDid: "not-a-did",
+        repository: "not a URL",
+      },
+      application: {
+        name: "probe",
+        description: "probe",
+        applicationDid: "not-a-did",
+        website: "not a URL",
+      },
+      plugin: { repository: "https://registry.example/applications/probe/plugin.json" },
+    };
+    const outDir = await mkdtemp(join(tmpdir(), "bridge-gen-malformed-"));
+    const orgConfigPath = join(outDir, "org.json");
+    await writeFile(orgConfigPath, JSON.stringify(malformed));
+
+    await expect(generate({ outDir, orgConfigPath })).rejects.toBeInstanceOf(GenerateError);
+    await expect(readFile(join(outDir, "mockapp", "registry-entry.json"), "utf8")).rejects.toThrow();
+  });
+
+  it("binds the entry applicationDid to the generated plugin applicationDid", () => {
+    const entry = {
+      version: "1",
+      application: { name: "App", description: "Desc", applicationDid: "did:web:app.example" },
+      native: false,
+      protocol: "mcp",
+      upstream: { name: "upstream", protocolVersion: "2024-11-05" },
+      plugin: { repository: "https://plugins.example/app.json" },
+      publisher: { name: "Pub", githubOrg: "pub" },
+      status: "beta",
+    };
+    expect(checkRegistryEntryV1(entry, "did:web:app.example")).toEqual([]);
+    const issues = checkRegistryEntryV1(entry, "did:web:other.example");
+    expect(issues.some((issue) => issue.path === "$.application.applicationDid")).toBe(true);
+  });
+
+  it("validator unit controls mirror the publish schema", () => {
+    const valid = {
+      version: "1",
+      application: { name: "App", description: "Desc", applicationDid: "did:web:app.example", website: "https://app.example" },
+      native: false,
+      protocol: "mcp",
+      upstream: {
+        name: "upstream",
+        protocolVersion: "2024-11-05",
+        repository: "https://upstream.example/repo",
+        distributionUrl: "https://upstream.example/dist",
+        package: "@scope/upstream",
+        toolSurface: { alg: "sha-256", value: "539D3s7u8i1S_GuowI99EstxnRsZUB8lh-32zVHzjSA" },
+      },
+      plugin: { repository: "https://plugins.example/app.json", pluginDid: "did:web:plugins.example:app", artifactDid: "did:artifact:bafkreib7bxsgj2gmvlvzi477lhgzgzv477zxs3xyi4ovypt653sxlxtk6y" },
+      publisher: { name: "Pub", githubOrg: "pub", publisherDid: "did:web:pub.example", repository: "https://pub.example/repo" },
+      status: "beta",
+    };
+    expect(checkRegistryEntryV1(structuredClone(valid))).toEqual([]);
+
+    const mutations: Array<[string, (entry: Record<string, any>) => void]> = [
+      ["version", (e) => { e.version = "2"; }],
+      ["unknown top member", (e) => { e.extra = true; }],
+      ["draft marker", (e) => { e.draft = true; }],
+      ["empty application name", (e) => { e.application.name = ""; }],
+      ["malformed applicationDid", (e) => { e.application.applicationDid = "not-a-did"; }],
+      ["non-HTTPS website", (e) => { e.application.website = "http://app.example"; }],
+      ["unknown application member", (e) => { e.application.extra = 1; }],
+      ["non-boolean native", (e) => { e.native = "false"; }],
+      ["wrong protocol", (e) => { e.protocol = "openapi"; }],
+      ["missing upstream for a bridge", (e) => { delete e.upstream; }],
+      ["upstream present when native", (e) => { e.native = true; }],
+      ["empty upstream name", (e) => { e.upstream.name = ""; }],
+      ["empty protocolVersion", (e) => { e.upstream.protocolVersion = ""; }],
+      ["non-HTTPS upstream repository", (e) => { e.upstream.repository = "git@github.com:x/y"; }],
+      ["empty legacy package", (e) => { e.upstream.package = ""; }],
+      ["unknown upstream member", (e) => { e.upstream.extra = 1; }],
+      ["wrong toolSurface alg", (e) => { e.upstream.toolSurface.alg = "sha-512"; }],
+      ["padded toolSurface value", (e) => { e.upstream.toolSurface.value = "539D3s7u8i1S_GuowI99EstxnRsZUB8lh-32zVHzjSA="; }],
+      ["short toolSurface value", (e) => { e.upstream.toolSurface.value = "539D3s7u"; }],
+      ["unknown toolSurface member", (e) => { e.upstream.toolSurface.extra = 1; }],
+      ["missing plugin repository", (e) => { delete e.plugin.repository; }],
+      ["non-HTTPS plugin repository", (e) => { e.plugin.repository = "ftp://plugins.example/app.json"; }],
+      ["malformed pluginDid", (e) => { e.plugin.pluginDid = "did:X:bad"; }],
+      ["unknown plugin member", (e) => { e.plugin.extra = 1; }],
+      ["empty publisher name", (e) => { e.publisher.name = ""; }],
+      ["missing githubOrg", (e) => { delete e.publisher.githubOrg; }],
+      ["malformed publisherDid", (e) => { e.publisher.publisherDid = "not-a-did"; }],
+      ["non-HTTPS publisher repository", (e) => { e.publisher.repository = "not a URL"; }],
+      ["unknown publisher member", (e) => { e.publisher.extra = 1; }],
+      ["unknown status", (e) => { e.status = "canary"; }],
+      ["missing status", (e) => { delete e.status; }],
+    ];
+    for (const [label, mutate] of mutations) {
+      const entry = structuredClone(valid);
+      mutate(entry);
+      expect(checkRegistryEntryV1(entry).length, label).toBeGreaterThan(0);
+    }
   });
 });
 

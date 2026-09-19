@@ -38,7 +38,7 @@ it("builds a generated bridge against the candidate SDK and signs P-256 Action a
     await writeFile(probe, `
 import assert from "node:assert/strict";
 import { GeneratedBridge } from "./dist/index.js";
-import { generateP256Key, KeyManager, ActionRelayClient, verifyMpasRfc9421, verifyApproval, computeJsonHash } from "@oma3/mpas";
+import { generateP256Key, KeyManager, ActionRelayClient, verifyMpasRfc9421, verifyApproval, computeJsonHash, loadPlugin as loadSdkPlugin } from "@oma3/mpas";
 const key = await generateP256Key();
 const manager = KeyManager.fromJwk(key.privateJwk);
 let actions = 0, polls = 0;
@@ -57,8 +57,10 @@ globalThis.fetch = async (input, init) => {
   actions++;
   return new Response(JSON.stringify({ version: "1", type: "ActionResponse", verifier: { did: manager.did }, actionEnvelopeHash: computeJsonHash(pkg.actionEnvelope), result: "rejected", error: { code: "FIXTURE_REJECTED", message: "Fixture only" } }), { status: 200 });
 };
+const pluginResult = await loadSdkPlugin(new URL("../plugin.json", import.meta.url).pathname);
+const plugin = pluginResult.plugin;
 for (const relay of [false, true]) {
-  const bridge = new GeneratedBridge({ plugin: new URL("../plugin.json", import.meta.url).pathname, applicationDid: "did:web:suite-probe.example", agentKey: key.privateJwk, adapterUrl: "https://adapter.example", ...(relay ? { actionEndpoint: { url: "https://relay.example", verifierDid: manager.did } } : {}) });
+  const bridge = new GeneratedBridge({ plugin, applicationDid: "did:web:suite-probe.example", agentKey: key.privateJwk, adapterUrl: "https://adapter.example", ...(relay ? { actionEndpoint: { url: "https://relay.example", verifierDid: manager.did } } : {}) });
   try { await bridge.handleToolCall("echo", {}); } finally { bridge.stop(); }
 }
 await new ActionRelayClient({ url: "https://relay.example", signer: manager }).pollDeliveries();

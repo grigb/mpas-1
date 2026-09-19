@@ -194,9 +194,6 @@ function assertModernEnvelope(params: Record<string, unknown> | undefined): void
   if (!meta || meta[PROTOCOL_VERSION_META_KEY] !== MCP_TASKS_PROTOCOL_VERSION) {
     throw invalidParams(`Requests must declare ${PROTOCOL_VERSION_META_KEY}=${MCP_TASKS_PROTOCOL_VERSION}.`);
   }
-  if (!isObject(meta[CLIENT_CAPABILITIES_META_KEY])) {
-    throw invalidParams(`Requests must declare ${CLIENT_CAPABILITIES_META_KEY}.`);
-  }
 }
 
 function protocolError(error: unknown): { code: number; message: string; data?: unknown } {

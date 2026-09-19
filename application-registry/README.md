@@ -21,6 +21,10 @@ Multiple implementations of the same application get separate files because they
 
 ## Schema (v1)
 
+The machine-readable publish contract is [`schema.v1.json`](./schema.v1.json) (JSON Schema draft 2020-12). An entry is publishable only when it validates against that schema. v1 covers MCP integrations (`protocol: "mcp"`); future protocols (OpenAPI, EVM, A2A) will define their own upstream object formats in a later schema version.
+
+**Publishable entries vs generator drafts.** Files in this registry are publishable entries: every value is real and the file carries no draft marker. The bridge generator writes a `registry-entry.json` during packaging; while any generated placeholder remains it marks that file with an explicit top-level `"draft": true` and logs it as nonpublishable. A draft is not schema-valid — the publish schema declares no `draft` member and rejects it — and it must never be copied into this registry as-is. Once every publish field is real (organization config including the plugin repository URL), the generator omits the marker and requires full validation before writing.
+
 Each JSON file has the following structure:
 
 ### Top-Level Fields
@@ -56,6 +60,7 @@ Present when `native` is `false`. The object format depends on the `protocol` fi
 | `protocolVersion` | Yes      | MCP protocol revision observed for this integration. Discovery hint only; the installed plugin is authoritative at runtime. |
 | `repository`      | No       | Upstream source repository URL. Omit when private or unknown. |
 | `distributionUrl` | No       | Page where a human can obtain the pinned upstream artifact (versioned npm/PyPI/release/commit URL, or hosted endpoint). Launch pins live in the implementation repo. |
+| `package`         | No       | **v1 compatibility field.** Legacy npm package name of the upstream server, kept so the first accepted entry stays valid. New entries should use `repository`/`distributionUrl` instead. |
 | `toolSurface`     | No       | Digest of the discovered upstream tool surface (`{ "alg": "sha-256", "value": "<base64url>" }`). Advisory drift signal, not a runtime control. |
 
 Future protocols (OpenAPI, EVM, A2A) will define their own upstream object formats.

@@ -188,6 +188,68 @@ describe("MpasTasksServer modern dispatcher", () => {
     });
   });
 
+  it("selects -32602 for protocol-version faults and -32021 for capability faults", async () => {
+    const server = makeServer();
+    const noMeta = await server.handleMessage({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "merge_pull_request" } });
+    expect(noMeta).toMatchObject({ error: { code: -32602 } });
+
+    const wrongVersion = await server.handleMessage({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: {
+        name: "merge_pull_request",
+        _meta: { ...META, "io.modelcontextprotocol/protocolVersion": "2025-03-26" },
+      },
+    });
+    expect(wrongVersion).toMatchObject({ error: { code: -32602 } });
+
+    const absentCapabilities = await server.handleMessage({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: {
+        name: "merge_pull_request",
+        _meta: { "io.modelcontextprotocol/protocolVersion": MCP_TASKS_PROTOCOL_VERSION },
+      },
+    });
+    expect(absentCapabilities).toMatchObject({
+      error: {
+        code: -32021,
+        data: {
+          requiredCapabilities: {
+            extensions: {
+              "io.modelcontextprotocol/tasks": {},
+              "org.oma3/mpas": { version: "2" },
+            },
+          },
+        },
+      },
+    });
+
+    const nonObjectCapabilities = await server.handleMessage({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "tools/call",
+      params: {
+        name: "merge_pull_request",
+        _meta: {
+          "io.modelcontextprotocol/protocolVersion": MCP_TASKS_PROTOCOL_VERSION,
+          "io.modelcontextprotocol/clientCapabilities": "tasks",
+        },
+      },
+    });
+    expect(nonObjectCapabilities).toMatchObject({ error: { code: -32021 } });
+
+    const protocolFaultWinsOverCapabilityFault = await server.handleMessage({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "tools/call",
+      params: { name: "merge_pull_request" },
+    });
+    expect(protocolFaultWinsOverCapabilityFault).toMatchObject({ error: { code: -32602 } });
+  });
+
   it("supports update and cooperative cancellation acknowledgements", async () => {
     const server = makeServer();
     const called = await server.handleMessage(request(1, "tools/call", { name: "merge_pull_request" }));

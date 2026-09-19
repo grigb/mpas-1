@@ -4,8 +4,63 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { loadPlugin } from "../../src/core/plugin-loader.js";
+import { PLUGIN_RESOURCE_LIMITS } from "@oma3/mpas/plugin-loader";
 
 const pluginsDir = fileURLToPath(new URL("../fixtures/plugins/", import.meta.url));
+
+/** Mirrors the loader's counting rule: every JSON value; keys are not values. */
+function countJsonNodes(value: unknown): number {
+  let nodes = 1;
+  if (Array.isArray(value)) {
+    for (const entry of value) nodes += countJsonNodes(entry);
+  } else if (value !== null && typeof value === "object") {
+    for (const key of Object.keys(value)) nodes += countJsonNodes((value as Record<string, unknown>)[key]);
+  }
+  return nodes;
+}
+
+/** Mirrors the loader's depth rule: containment depth, root value = 0. */
+function jsonDepth(value: unknown): number {
+  if (Array.isArray(value)) {
+    return value.length === 0 ? 0 : 1 + Math.max(...value.map(jsonDepth));
+  }
+  if (value !== null && typeof value === "object") {
+    const members = Object.values(value);
+    return members.length === 0 ? 0 : 1 + Math.max(...members.map(jsonDepth));
+  }
+  return 0;
+}
+
+function basePlugin(): Record<string, unknown> {
+  return {
+    version: "1",
+    type: "MpasApplicationPlugin",
+    pluginDid: "did:web:plugins.example:boundary",
+    pluginVersion: "1.0.0",
+    publisherDid: "did:web:publisher.example",
+    applicationDid: "did:web:app.example",
+    executionProfile: { id: "did:web:profiles.example:mcp", protocolVersion: "2024-11-05" },
+    operations: {
+      probe: { executionPayloadSchema: { type: "object" } },
+    },
+  };
+}
+
+/** Nests a leaf schema under `wraps` object/property levels (each adds 2 depth). */
+function nestedSchema(wraps: number, leaf: Record<string, unknown>): Record<string, unknown> {
+  let schema = leaf;
+  for (let index = 0; index < wraps; index += 1) {
+    schema = { type: "object", properties: { a: schema } };
+  }
+  return schema;
+}
+
+async function writePlugin(contents: string): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), "mpas-plugin-boundary-"));
+  const path = join(dir, "plugin.json");
+  await writeFile(path, contents);
+  return path;
+}
 
 describe("loadPlugin", () => {
   it("loads the valid GitHub plugin fixture", async () => {
@@ -100,5 +155,255 @@ describe("loadPlugin", () => {
         code: "PLUGIN_READ_FAILED",
       },
     });
+  });
+});
+
+describe("loadPlugin resource bounds (N33)", () => {
+  it("accepts a document at exactly 262,144 bytes and rejects 262,145", async () => {
+    const plugin = basePlugin();
+    (plugin.operations as Record<string, { description?: string }>).probe.description = "";
+    const emptyOverhead = Buffer.byteLength(JSON.stringify(plugin), "utf8");
+    const pad = (target: number) => "x".repeat(target - emptyOverhead);
+
+    (plugin.operations as Record<string, { description?: string }>).probe.description = pad(PLUGIN_RESOURCE_LIMITS.maxPluginDocumentBytes);
+    const atLimit = JSON.stringify(plugin);
+    expect(Buffer.byteLength(atLimit, "utf8")).toBe(PLUGIN_RESOURCE_LIMITS.maxPluginDocumentBytes);
+    const accepted = await loadPlugin(await writePlugin(atLimit));
+    expect(accepted.ok).toBe(true);
+
+    (plugin.operations as Record<string, { description?: string }>).probe.description = pad(PLUGIN_RESOURCE_LIMITS.maxPluginDocumentBytes + 1);
+    const aboveLimit = JSON.stringify(plugin);
+    expect(Buffer.byteLength(aboveLimit, "utf8")).toBe(PLUGIN_RESOURCE_LIMITS.maxPluginDocumentBytes + 1);
+    const rejected = await loadPlugin(await writePlugin(aboveLimit));
+    expect(rejected).toMatchObject({
+      ok: false,
+      error: { code: "PLUGIN_RESOURCE_EXCEEDED", details: { resource: "plugin-document-bytes" } },
+    });
+  });
+
+  it("rejects the proved one-megabyte-description plugin", async () => {
+    const plugin = basePlugin();
+    (plugin.operations as Record<string, { description?: string }>).probe.description = "x".repeat(1_048_576);
+    const result = await loadPlugin(await writePlugin(JSON.stringify(plugin)));
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "PLUGIN_RESOURCE_EXCEEDED", details: { resource: "plugin-document-bytes" } },
+    });
+  });
+
+  it("passes a document at depth 64 and rejects depth 65", async () => {
+    const at64 = basePlugin();
+    (at64.operations as Record<string, { executionPayloadSchema: unknown }>).probe.executionPayloadSchema = nestedSchema(29, {
+      type: "array",
+      items: { type: "array", items: { type: "string" } },
+    });
+    const schema = (at64.operations as Record<string, { executionPayloadSchema: unknown }>).probe.executionPayloadSchema;
+    expect(jsonDepth(schema)).toBe(61);
+    expect(jsonDepth(at64)).toBe(64);
+    const below = await loadPlugin(await writePlugin(JSON.stringify(at64)));
+    // Document depth 64 passes the document bound; the schema-depth bound (32) fires later.
+    expect(below).toMatchObject({
+      ok: false,
+      error: { code: "PLUGIN_RESOURCE_EXCEEDED", details: { resource: "operation-schema-depth" } },
+    });
+
+    const at65 = basePlugin();
+    (at65.operations as Record<string, { executionPayloadSchema: unknown }>).probe.executionPayloadSchema = nestedSchema(30, {
+      type: "array",
+      items: { type: "string" },
+    });
+    expect(jsonDepth(at65)).toBe(65);
+    const above = await loadPlugin(await writePlugin(JSON.stringify(at65)));
+    expect(above).toMatchObject({
+      ok: false,
+      error: { code: "PLUGIN_RESOURCE_EXCEEDED", details: { resource: "plugin-document-depth" } },
+    });
+  });
+
+  it("accepts a document at exactly 20,000 nodes and rejects 20,001", async () => {
+    const plugin = basePlugin();
+    plugin.credentialRequirements = [{ type: "x", expectedAuthority: [] as string[] }];
+    const base = countJsonNodes(plugin);
+    const authority = plugin.credentialRequirements as Array<{ expectedAuthority: string[] }>;
+    const padTo = (target: number) => {
+      authority[0].expectedAuthority = Array.from({ length: target - base }, () => "a");
+    };
+
+    padTo(PLUGIN_RESOURCE_LIMITS.maxPluginDocumentNodes);
+    expect(countJsonNodes(plugin)).toBe(PLUGIN_RESOURCE_LIMITS.maxPluginDocumentNodes);
+    const accepted = await loadPlugin(await writePlugin(JSON.stringify(plugin)));
+    expect(accepted.ok).toBe(true);
+
+    padTo(PLUGIN_RESOURCE_LIMITS.maxPluginDocumentNodes + 1);
+    expect(countJsonNodes(plugin)).toBe(PLUGIN_RESOURCE_LIMITS.maxPluginDocumentNodes + 1);
+    const rejected = await loadPlugin(await writePlugin(JSON.stringify(plugin)));
+    expect(rejected).toMatchObject({
+      ok: false,
+      error: { code: "PLUGIN_RESOURCE_EXCEEDED", details: { resource: "plugin-document-nodes" } },
+    });
+  });
+
+  it("accepts an operation schema at depth 32, rejects 33 and the proved depth-128 case", async () => {
+    const at32 = basePlugin();
+    (at32.operations as Record<string, { executionPayloadSchema: unknown }>).probe.executionPayloadSchema = nestedSchema(15, {
+      type: "array",
+      items: { type: "string" },
+    });
+    expect(jsonDepth((at32.operations as Record<string, { executionPayloadSchema: unknown }>).probe.executionPayloadSchema)).toBe(32);
+    expect((await loadPlugin(await writePlugin(JSON.stringify(at32)))).ok).toBe(true);
+
+    for (const [label, schema, resource] of [
+      ["depth-33", nestedSchema(15, { type: "array", items: { type: "array", items: { type: "string" } } }), "operation-schema-depth"],
+      ["depth-128 (proved)", nestedSchema(63, { type: "array", items: { type: "string" } }), "plugin-document-depth"],
+    ] as const) {
+      const plugin = basePlugin();
+      (plugin.operations as Record<string, { executionPayloadSchema: unknown }>).probe.executionPayloadSchema = schema;
+      expect(jsonDepth(schema)).toBe(label === "depth-33" ? 33 : 128);
+      const result = await loadPlugin(await writePlugin(JSON.stringify(plugin)));
+      // depth-33 sits under the document bound and trips the schema bound;
+      // depth-128 puts the whole document at depth 131 and trips the document bound first.
+      expect(result, label).toMatchObject({
+        ok: false,
+        error: { code: "PLUGIN_RESOURCE_EXCEEDED", details: { resource } },
+      });
+    }
+  });
+
+  it("accepts operation schemas at exactly 4,096 aggregate nodes and rejects 4,097", async () => {
+    const build = (total: number) => {
+      const plugin = basePlugin();
+      const operations = plugin.operations as Record<string, { executionPayloadSchema: unknown }>;
+      let count = countJsonNodes(operations.probe.executionPayloadSchema);
+      let index = 0;
+      while (count < total) {
+        index += 1;
+        operations[`op${index}`] = { executionPayloadSchema: { type: "object" } };
+        count += 2;
+      }
+      return plugin;
+    };
+
+    const atLimit = build(PLUGIN_RESOURCE_LIMITS.maxOperationSchemaNodes);
+    expect(
+      Object.values(atLimit.operations as Record<string, { executionPayloadSchema: unknown }>).reduce(
+        (sum, op) => sum + countJsonNodes(op.executionPayloadSchema),
+        0,
+      ),
+    ).toBe(PLUGIN_RESOURCE_LIMITS.maxOperationSchemaNodes);
+    expect((await loadPlugin(await writePlugin(JSON.stringify(atLimit)))).ok).toBe(true);
+
+    const aboveLimit = build(PLUGIN_RESOURCE_LIMITS.maxOperationSchemaNodes + 2);
+    const rejected = await loadPlugin(await writePlugin(JSON.stringify(aboveLimit)));
+    expect(rejected).toMatchObject({
+      ok: false,
+      error: { code: "PLUGIN_RESOURCE_EXCEEDED", details: { resource: "operation-schema-nodes" } },
+    });
+  });
+
+  it("accepts exactly 256 allOf/anyOf/oneOf branches and rejects 257", async () => {
+    const build = (branches: number) => {
+      const plugin = basePlugin();
+      (plugin.operations as Record<string, { executionPayloadSchema: unknown }>).probe.executionPayloadSchema = {
+        type: "object",
+        anyOf: Array.from({ length: branches }, () => ({ type: "string" })),
+      };
+      return plugin;
+    };
+
+    expect((await loadPlugin(await writePlugin(JSON.stringify(build(PLUGIN_RESOURCE_LIMITS.maxOperationSchemaBranches))))).ok).toBe(true);
+    const rejected = await loadPlugin(await writePlugin(JSON.stringify(build(PLUGIN_RESOURCE_LIMITS.maxOperationSchemaBranches + 1))));
+    expect(rejected).toMatchObject({
+      ok: false,
+      error: { code: "PLUGIN_RESOURCE_EXCEEDED", details: { resource: "operation-schema-branches" } },
+    });
+  });
+
+  it("accepts a safe regex source at exactly 256 bytes and rejects 257", async () => {
+    const build = (bytes: number) => {
+      const plugin = basePlugin();
+      (plugin.operations as Record<string, { executionPayloadSchema: unknown }>).probe.executionPayloadSchema = {
+        type: "object",
+        properties: { a: { type: "string", pattern: `^${"a".repeat(bytes - 2)}$` } },
+      };
+      return plugin;
+    };
+
+    const atLimit = build(PLUGIN_RESOURCE_LIMITS.maxRegexSourceBytes);
+    expect((await loadPlugin(await writePlugin(JSON.stringify(atLimit)))).ok).toBe(true);
+
+    const rejected = await loadPlugin(await writePlugin(JSON.stringify(build(PLUGIN_RESOURCE_LIMITS.maxRegexSourceBytes + 1))));
+    expect(rejected).toMatchObject({
+      ok: false,
+      error: { code: "PLUGIN_RESOURCE_EXCEEDED", details: { resource: "regex-source-bytes" } },
+    });
+  });
+
+  it.each([
+    ["proved (a+)+$", "(a+)+$"],
+    ["group", "^(a+)+$"],
+    ["dot", "^a.*$"],
+    ["unbounded +", "^a+$"],
+    ["unbounded *", "^a*$"],
+    ["optional ?", "^a?$"],
+    ["alternation", "^a|b$"],
+    ["unbounded {m,}", "^a{2,}$"],
+    ["bound over 1,024", "^a{1025}$"],
+    ["capturing group", "^(a)$"],
+    ["non-capturing group", "^(?:ab)$"],
+    ["lookahead", "^a(?=b)$"],
+    ["backreference", "^a\\1$"],
+    ["named backreference", "^(?<n>a)\\k<n>$"],
+    ["unterminated class", "^[a-$"],
+    ["empty class", "^[]$"],
+    ["malformed bound", "^a{,5}$"],
+    ["inverted bound", "^a{5,2}$"],
+    ["interior anchor", "^a^b$"],
+    ["unanchored", "^ab"],
+  ])("rejects the unsafe regex %s before Ajv sees it", async (_label, pattern) => {
+    const plugin = basePlugin();
+    (plugin.operations as Record<string, { executionPayloadSchema: unknown }>).probe.executionPayloadSchema = {
+      type: "object",
+      properties: { a: { type: "string", pattern } },
+    };
+    const result = await loadPlugin(await writePlugin(JSON.stringify(plugin)));
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "PLUGIN_RESOURCE_EXCEEDED", details: { resource: "regex-unsafe-construct" } },
+    });
+  });
+
+  it.each([
+    ["anchored class with finite bound", "^[0-9a-f]{64}$"],
+    ["escaped literal dot in class", "^did:web:example[.]com$"],
+    ["bound at exactly 1,024", "^a{1024}$"],
+    ["ranged bound at 1,024", "^[A-Z][0-9]{1,1024}$"],
+    ["class shorthand escape", "^\\d{8}$"],
+    ["plain literals", "^did:web:example$"],
+  ])("accepts the safe regex %s", async (_label, pattern) => {
+    const plugin = basePlugin();
+    (plugin.operations as Record<string, { executionPayloadSchema: unknown }>).probe.executionPayloadSchema = {
+      type: "object",
+      properties: { a: { type: "string", pattern } },
+    };
+    expect((await loadPlugin(await writePlugin(JSON.stringify(plugin)))).ok).toBe(true);
+  });
+
+  it("applies the safe-regex rule to patternProperties keys", async () => {
+    const unsafe = basePlugin();
+    (unsafe.operations as Record<string, { executionPayloadSchema: unknown }>).probe.executionPayloadSchema = {
+      type: "object",
+      patternProperties: { "^x+$": { type: "string" } },
+    };
+    expect(await loadPlugin(await writePlugin(JSON.stringify(unsafe)))).toMatchObject({
+      ok: false,
+      error: { code: "PLUGIN_RESOURCE_EXCEEDED", details: { resource: "regex-unsafe-construct" } },
+    });
+
+    const safe = basePlugin();
+    (safe.operations as Record<string, { executionPayloadSchema: unknown }>).probe.executionPayloadSchema = {
+      type: "object",
+      patternProperties: { "^x[0-9]$": { type: "string" } },
+    };
+    expect((await loadPlugin(await writePlugin(JSON.stringify(safe)))).ok).toBe(true);
   });
 });
