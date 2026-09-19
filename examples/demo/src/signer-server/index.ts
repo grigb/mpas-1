@@ -134,11 +134,21 @@ export class SignerServer {
           reviewSet.actionEnvelope,
           toolName === "mpas_approve" ? "approve" : "reject",
         );
-        await this.coordinationService.submitApproval({
+        const coordinationResponse: CoordinationApprovalResponse = await this.coordinationService.submitApproval({
           actionEnvelopeHash: approvalRequest.actionRef.actionEnvelopeHash,
           approval,
         });
-        return textResult(toolName === "mpas_approve" ? "Approval submitted." : "Rejection submitted.", { approval });
+        if (!coordinationResponse.accepted) {
+          return errorResult(
+            "COORDINATION_APPROVAL_REJECTED",
+            "The Coordination Service did not accept the signed decision.",
+            { approval, coordinationResponse },
+          );
+        }
+        return textResult(
+          toolName === "mpas_approve" ? "Approval submitted." : "Rejection submitted.",
+          { approval, coordinationResponse },
+        );
       }
       default:
         return errorResult("UNKNOWN_TOOL", `Unknown signer tool: ${toolName}`);

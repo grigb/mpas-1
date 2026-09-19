@@ -130,7 +130,19 @@ describe("strict signed Approval payload parsing", () => {
 
     it("still sends the same signed payload without duplicate members", async () => {
       const fetchMock = vi.fn().mockResolvedValue(
-        new Response(JSON.stringify({ version: "1", type: "CoordinationApprovalSubmissionResponse", accepted: true })),
+        new Response(JSON.stringify({
+          version: "1",
+          type: "CoordinationApprovalSubmissionResponse",
+          accepted: true,
+          actionRef: {
+            version: "1",
+            type: "ActionRef",
+            actionId: actionPackage.actionEnvelope.actionId,
+            actionEnvelopeHash: actionPackage.approvalBundle.actionEnvelopeHash,
+          },
+          state: "executed",
+          createdAt: "2026-06-05T18:20:00.000Z",
+        })),
       );
       vi.stubGlobal("fetch", fetchMock);
       const client = new CoordinationClient({ url: "https://coordination.example.com", signer: keyManager });

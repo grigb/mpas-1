@@ -413,9 +413,9 @@ export interface CoordinationApprovalResponse {
   version: MpasVersion;
   type: "CoordinationApprovalSubmissionResponse";
   accepted: boolean;
-  actionRef?: ActionReference;
-  state?: CoordinationState;
-  createdAt?: Timestamp;
+  actionRef: ActionReference;
+  state: CoordinationState;
+  createdAt: Timestamp;
 }
 
 export interface CoordinationCancelResponse {

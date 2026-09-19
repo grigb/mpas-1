@@ -223,17 +223,32 @@ describe("CoordinationStore", () => {
     expect(update.progress).toMatchObject({ required: 2, collected: 0 });
   });
 
-  it("rejects self-approval — proposer cannot approve their own action", async () => {
+  it("accepts a proposer Approval only when the settled policy makes that decision eligible", async () => {
     const request = await coordinationActionRequest();
     const store = new CoordinationStore();
     const proposer = await fixtureKey("proposer");
 
-    // Make the proposer eligible as a signer for this test
+    request.authorizationRequirements.approvalRequirements.anyOf![0].threshold = 1;
     request.authorizationRequirements.approvalRequirements.anyOf![0].eligibleSigners.push(proposer.did);
-
     store.createWorkflow(request);
 
-    // Proposer tries to approve their own action
+    const selfApproval = await signApproval(request.authorizationRequirements.actionEnvelopeHash, proposer, "approve");
+    const response = store.submitApproval({
+      version: "1",
+      type: "CoordinationApprovalSubmission",
+      actionEnvelopeHash: request.authorizationRequirements.actionEnvelopeHash,
+      approval: selfApproval,
+    });
+
+    expect(response).toMatchObject({ accepted: true, state: "readyForSubmission" });
+  });
+
+  it("denies a proposer decision that the settled policy does not authorize", async () => {
+    const request = await coordinationActionRequest();
+    const store = new CoordinationStore();
+    const proposer = await fixtureKey("proposer");
+    store.createWorkflow(request);
+
     const selfApproval = await signApproval(request.authorizationRequirements.actionEnvelopeHash, proposer, "approve");
     expect(() =>
       store.submitApproval({
@@ -242,7 +257,7 @@ describe("CoordinationStore", () => {
         actionEnvelopeHash: request.authorizationRequirements.actionEnvelopeHash,
         approval: selfApproval,
       }),
-    ).toThrowError(MpasServiceError);
+    ).toThrowError(expect.objectContaining({ code: "SELF_APPROVAL_DENIED", statusCode: 403 }));
   });
 
   it("cancels awaiting actions, hides them from signers, and rejects later approvals", async () => {

@@ -90,7 +90,14 @@ describe("SignerServer", () => {
         const body = JSON.parse(await readRequestBody(request)) as { actionEnvelopeHash: unknown; approval: Approval };
         submittedApproval = body.approval;
         submittedHash = body.actionEnvelopeHash;
-        sendJson(response, { version: "1", type: "CoordinationApprovalSubmissionResponse", accepted: true });
+        sendJson(response, {
+          version: "1",
+          type: "CoordinationApprovalSubmissionResponse",
+          accepted: true,
+          actionRef: pollResponse.approvalRequests[0].actionRef,
+          state: "awaitingApprovals",
+          createdAt: "2026-06-05T18:20:00.000Z",
+        });
         return;
       }
       response.statusCode = 404;
@@ -111,7 +118,120 @@ describe("SignerServer", () => {
       expect(submittedHash).toEqual(pollResponse.approvalRequests[0].actionRef.actionEnvelopeHash);
       expect(result.structuredContent).toMatchObject({
         approval: { decision: "approve" },
+        coordinationResponse: {
+          accepted: true,
+          actionRef: pollResponse.approvalRequests[0].actionRef,
+          state: "awaitingApprovals",
+          createdAt: "2026-06-05T18:20:00.000Z",
+        },
       });
+    } finally {
+      await coordination.close();
+    }
+  });
+
+  it("returns an MCP error when Coordination does not accept the signed decision", async () => {
+    const pollResponse = await readJson<CoordinationPollResponse>(
+      join(fixturesDir, "responses", "coordination-pending-actions.json"),
+    );
+    const coordination = await startMockCoordination((_request, response) => {
+      if (_request.url === "/mpas/v1/coordination/poll") {
+        sendJson(response, pollResponse);
+        return;
+      }
+      sendJson(response, {
+        version: "1",
+        type: "CoordinationApprovalSubmissionResponse",
+        accepted: false,
+        actionRef: pollResponse.approvalRequests[0].actionRef,
+        state: "awaitingApprovals",
+        createdAt: "2026-06-05T18:20:00.000Z",
+      });
+    });
+
+    try {
+      const server = new SignerServer({
+        signerKey: join(testKeysDir, "maintainer-a.json"),
+        coordinationUrl: coordination.url,
+      });
+      const result = await server.handleToolCall("mpas_reject", {
+        actionId: pollResponse.approvalRequests[0].actionRef.actionId.value,
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0]).toMatchObject({
+        text: expect.stringContaining("COORDINATION_APPROVAL_REJECTED"),
+      });
+      expect(result.structuredContent).toMatchObject({
+        approval: { decision: "reject" },
+        coordinationResponse: { accepted: false, state: "awaitingApprovals" },
+      });
+    } finally {
+      await coordination.close();
+    }
+  });
+
+  it("does not report success for a malformed Coordination response", async () => {
+    const pollResponse = await readJson<CoordinationPollResponse>(
+      join(fixturesDir, "responses", "coordination-pending-actions.json"),
+    );
+    const coordination = await startMockCoordination((_request, response) => {
+      if (_request.url === "/mpas/v1/coordination/poll") {
+        sendJson(response, pollResponse);
+        return;
+      }
+      sendJson(response, { version: "1", type: "CoordinationApprovalSubmissionResponse", accepted: "yes" });
+    });
+
+    try {
+      const server = new SignerServer({
+        signerKey: join(testKeysDir, "maintainer-a.json"),
+        coordinationUrl: coordination.url,
+      });
+      await expect(server.handleToolCall("mpas_approve", {
+        actionId: pollResponse.approvalRequests[0].actionRef.actionId.value,
+      })).rejects.toThrow(/boolean accepted/i);
+    } finally {
+      await coordination.close();
+    }
+  });
+
+  it("preserves the accepted state returned for an idempotent duplicate decision", async () => {
+    const pollResponse = await readJson<CoordinationPollResponse>(
+      join(fixturesDir, "responses", "coordination-pending-actions.json"),
+    );
+    let submissionCount = 0;
+    const coordination = await startMockCoordination((_request, response) => {
+      if (_request.url === "/mpas/v1/coordination/poll") {
+        sendJson(response, pollResponse);
+        return;
+      }
+      submissionCount += 1;
+      sendJson(response, {
+        version: "1",
+        type: "CoordinationApprovalSubmissionResponse",
+        accepted: true,
+        actionRef: pollResponse.approvalRequests[0].actionRef,
+        state: "awaitingApprovals",
+        createdAt: "2026-06-05T18:20:00.000Z",
+      });
+    });
+
+    try {
+      const server = new SignerServer({
+        signerKey: join(testKeysDir, "maintainer-a.json"),
+        coordinationUrl: coordination.url,
+      });
+      const args = { actionId: pollResponse.approvalRequests[0].actionRef.actionId.value };
+      const first = await server.handleToolCall("mpas_approve", args);
+      const duplicate = await server.handleToolCall("mpas_approve", args);
+
+      expect(submissionCount).toBe(2);
+      expect(first.isError).toBeUndefined();
+      expect(duplicate.isError).toBeUndefined();
+      expect(duplicate.structuredContent?.coordinationResponse).toEqual(
+        first.structuredContent?.coordinationResponse,
+      );
     } finally {
       await coordination.close();
     }

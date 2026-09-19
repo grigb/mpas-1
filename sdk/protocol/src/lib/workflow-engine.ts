@@ -13,6 +13,7 @@ import type {
   Did,
 } from "../types/mpas.js";
 import { CoordinationResponseError, MpasAuthError } from "./coordination-client.js";
+import { computeIdempotencyFingerprint } from "./routing.js";
 import { computeJsonHash } from "../utils/hash.js";
 import {
   TERMINAL_WORKFLOW_STATES,
@@ -137,6 +138,16 @@ interface PolicyUnavailableRetryAttempt {
   at: string;
 }
 
+type SubmissionPhase = "initial" | "completed";
+
+interface SubmissionIdempotencyBinding {
+  stage: SubmissionPhase;
+  outcome: "idempotencyBound";
+  idempotencyKey: string;
+  requestFingerprint: string;
+  at: string;
+}
+
 export class BridgeWorkflowEngine {
   private readonly store: WorkflowStore;
   private readonly actionEndpoint: WorkflowActionEndpoint;
@@ -216,6 +227,9 @@ export class BridgeWorkflowEngine {
    * deferred result can be returned even when the adapter is unreachable.
    */
   async propose(input: CreateWorkflowInput): Promise<ProposeResult> {
+    if (proposerDidOfPackage(input.actionPackage) !== this.proposerDid) {
+      throw new Error("Action Package proposer DID does not match this bridge identity.");
+    }
     if (input.taskId === input.actionId) {
       throw new Error("Task ID and Action ID must be distinct.");
     }
@@ -250,9 +264,17 @@ export class BridgeWorkflowEngine {
         for (const update of poll.actionUpdates) {
           await this.applyUpdate(update);
         }
-      } catch {
+      } catch (error) {
         // Coordination updates are one input to the engine. Independent
         // Action retries must still run when this input is unavailable.
+        if (permanentCoordinationFailure(error)) {
+          const resolution = coordinationFailureResolution(error);
+          for (const record of this.store.listRecoverableWorkflows()) {
+            if (record.state === "awaitingApprovals" && proposerDidOf(record) === this.proposerDid) {
+              this.resolveUnresolvable(record.taskId, resolution.errorCode, resolution.errorMessage);
+            }
+          }
+        }
       }
     }
 
@@ -301,17 +323,21 @@ export class BridgeWorkflowEngine {
    */
   async waitForResult(taskId: string, timeoutMs: number): Promise<WorkflowRecord | undefined> {
     const record = this.store.getWorkflow(taskId);
-    if (!record || isTerminal(record) || timeoutMs <= 0) {
+    if (!record || proposerDidOf(record) !== this.proposerDid) {
+      return undefined;
+    }
+    if (isTerminal(record) || timeoutMs <= 0) {
       return record;
     }
 
-    return new Promise<WorkflowRecord>((resolve) => {
+    return new Promise<WorkflowRecord | undefined>((resolve) => {
       const waiters = this.waiters.get(taskId) ?? new Set();
       this.waiters.set(taskId, waiters);
 
       const timer = setTimeout(() => {
         waiters.delete(wake);
-        resolve(this.mustGet(taskId));
+        const current = this.store.getWorkflow(taskId);
+        resolve(current && proposerDidOf(current) === this.proposerDid ? current : undefined);
       }, timeoutMs);
 
       const wake = (terminal: WorkflowRecord): void => {
@@ -325,7 +351,7 @@ export class BridgeWorkflowEngine {
 
   private async submitInitial(record: WorkflowRecord): Promise<ProposeResult> {
     const current = this.store.getWorkflow(record.taskId);
-    if (!current || isTerminal(current) || current.state !== "created") {
+    if (!current || proposerDidOf(current) !== this.proposerDid || isTerminal(current) || current.state !== "created") {
       return this.resultFromRecord(current ?? record);
     }
     if (!this.holdClaim(current.taskId)) {
@@ -334,7 +360,11 @@ export class BridgeWorkflowEngine {
 
     let response: ActionResponse;
     try {
-      response = await this.actionEndpoint.submitActionRequest(actionRequestFor(record, record.actionPackage));
+      const request = this.submissionRequest(current, current.actionPackage, "initial");
+      if (!request) {
+        return { kind: "deferred", record: this.mustGet(record.taskId) };
+      }
+      response = await this.actionEndpoint.submitActionRequest(request);
     } catch (error) {
       this.store.saveAdapterAttempt(record.taskId, attempt("initial", "unreachable", error));
       return { kind: "deferred", record: this.mustGet(record.taskId) };
@@ -462,7 +492,7 @@ export class BridgeWorkflowEngine {
   private async applyUpdate(update: CoordinationActionUpdate): Promise<void> {
     const actionId = update.actionRef.actionId.value;
     const record = this.store.getWorkflowByActionId(actionId);
-    if (!record || isTerminal(record)) {
+    if (!record || proposerDidOf(record) !== this.proposerDid || isTerminal(record)) {
       return;
     }
 
@@ -475,6 +505,14 @@ export class BridgeWorkflowEngine {
       switch (update.state) {
         case "readyForSubmission":
           if (update.actionPackage !== undefined) {
+            if (proposerDidOfPackage(update.actionPackage) !== this.proposerDid) {
+              this.resolveUnresolvable(
+                current.taskId,
+                "PROPOSER_IDENTITY_MISMATCH",
+                "Coordination returned an Action Package owned by another proposer.",
+              );
+              break;
+            }
             this.store.saveCompletedPackage(current.taskId, update.actionPackage);
             this.store.compareAndSetState(current.taskId, "awaitingApprovals", "readyForSubmission");
           }
@@ -511,6 +549,7 @@ export class BridgeWorkflowEngine {
     await Promise.all(
       this.store
         .listRecoverableWorkflows()
+        .filter((record) => proposerDidOf(record) === this.proposerDid)
         .filter((record) => record.state !== "awaitingApprovals")
         .filter((record) => record.state !== "policyUnavailable" || this.policyUnavailableRetryIsDue(record))
         .map((record) => this.dispatchClaimable(record)),
@@ -585,43 +624,57 @@ export class BridgeWorkflowEngine {
    * Action's outcome.
    */
   private async submitCompleted(record: WorkflowRecord): Promise<void> {
-    if (!this.holdClaim(record.taskId)) {
+    const current = this.store.getWorkflow(record.taskId);
+    if (!current || proposerDidOf(current) !== this.proposerDid || isTerminal(current)) {
       return;
     }
-    const pkg = record.completedPackage ?? record.actionPackage;
-    if (record.state === "readyForSubmission") {
-      if (!this.store.compareAndSetState(record.taskId, "readyForSubmission", "submittingToVerifier")) {
+    if (!this.holdClaim(current.taskId)) {
+      return;
+    }
+    const pkg = current.completedPackage ?? current.actionPackage;
+    if (proposerDidOfPackage(pkg) !== this.proposerDid) {
+      this.resolveUnresolvable(
+        current.taskId,
+        "PROPOSER_IDENTITY_MISMATCH",
+        "The completed Action Package is owned by another proposer.",
+      );
+      return;
+    }
+    if (current.state === "readyForSubmission") {
+      if (!this.store.compareAndSetState(current.taskId, "readyForSubmission", "submittingToVerifier")) {
         return;
       }
     }
 
     let response: ActionResponse;
     try {
-      response = await this.actionEndpoint.submitActionRequest(actionRequestFor(record, pkg));
+      const request = this.submissionRequest(this.mustGet(current.taskId), pkg, "completed");
+      if (!request) return;
+      response = await this.actionEndpoint.submitActionRequest(request);
     } catch (error) {
-      this.store.saveAdapterAttempt(record.taskId, attempt("completed", "unreachable", error));
-      this.store.compareAndSetState(record.taskId, "submittingToVerifier", "readyForSubmission");
+      this.store.saveAdapterAttempt(current.taskId, attempt("completed", "unreachable", error));
+      this.store.compareAndSetState(current.taskId, "submittingToVerifier", "readyForSubmission");
       return;
     }
 
-    if (isTerminal(this.mustGet(record.taskId))) {
+    if (isTerminal(this.mustGet(current.taskId))) {
       return;
     }
 
     if (response.result === "pending") {
-      this.store.saveLastActionResponse(record.taskId, response);
-      this.store.compareAndSetState(record.taskId, "submittingToVerifier", "awaitingVerifierResult");
+      this.store.saveLastActionResponse(current.taskId, response);
+      this.store.compareAndSetState(current.taskId, "submittingToVerifier", "awaitingVerifierResult");
       return;
     }
 
     if (response.result === "policyUnavailable") {
-      this.deferForPolicyUnavailable(record.taskId, response, "completed");
+      this.deferForPolicyUnavailable(current.taskId, response, "completed");
       return;
     }
 
     if (response.result === "rejected" && REPLAY_CODES.has(response.error?.code ?? "")) {
       this.resolveUnresolvable(
-        record.taskId,
+        current.taskId,
         "RESULT_UNAVAILABLE",
         "The Action was already dispatched and its result is not retrievable from the Verifier.",
       );
@@ -629,16 +682,57 @@ export class BridgeWorkflowEngine {
     }
 
     if (response.result === "additionalApprovalsRequired") {
-      this.store.saveLastActionResponse(record.taskId, response);
+      this.store.saveLastActionResponse(current.taskId, response);
       await this.replaceAndSubmitToCoordination(
-        this.mustGet(record.taskId),
+        this.mustGet(current.taskId),
         "submittingToVerifier",
         response,
       );
       return;
     }
 
-    this.settle(record.taskId, response);
+    this.settle(current.taskId, response);
+  }
+
+  /**
+   * Build the Action Request for a submission phase, using the record's
+   * persisted idempotency key. The method records a content fingerprint on
+   * first use and fails closed if a later submission of the same phase
+   * carries different request bytes — the key would be reused with a
+   * different request body, which violates at-most-once delivery.
+   */
+  private submissionRequest(
+    record: WorkflowRecord,
+    actionPackage: unknown,
+    phase: SubmissionPhase,
+  ): ActionRequest | undefined {
+    const request = actionRequestFor(record, actionPackage);
+    const requestFingerprint = computeIdempotencyFingerprint(request);
+    const bindings = record.adapterAttempts.filter(isSubmissionIdempotencyBinding)
+      .filter((binding) => binding.stage === phase);
+    const binding = bindings[0];
+
+    if (binding) {
+      if (binding.requestFingerprint !== requestFingerprint) {
+        this.resolveUnresolvable(
+          record.taskId,
+          "IDEMPOTENCY_REQUEST_CONFLICT",
+          `The ${phase} submission idempotency key is already bound to different request bytes.`,
+        );
+        return undefined;
+      }
+      return request;
+    }
+
+    const created: SubmissionIdempotencyBinding = {
+      stage: phase,
+      outcome: "idempotencyBound",
+      idempotencyKey: record.actionIdempotencyKey,
+      requestFingerprint,
+      at: new Date(this.now()).toISOString(),
+    };
+    this.store.saveAdapterAttempt(record.taskId, created);
+    return request;
   }
 
   private deferForPolicyUnavailable(
@@ -716,7 +810,9 @@ export class BridgeWorkflowEngine {
   private async sweepExpired(): Promise<void> {
     const nowMs = this.now();
     await Promise.all(
-      this.store.listRecoverableWorkflows().map((record) => {
+      this.store.listRecoverableWorkflows()
+        .filter((record) => proposerDidOf(record) === this.proposerDid)
+        .map((record) => {
         if (Date.parse(record.expiresAt) >= nowMs) {
           return Promise.resolve();
         }
@@ -798,7 +894,10 @@ function isTerminal(record: WorkflowRecord): boolean {
 }
 
 function proposerDidOf(record: WorkflowRecord): string | undefined {
-  const pkg = record.actionPackage;
+  return proposerDidOfPackage(record.actionPackage);
+}
+
+function proposerDidOfPackage(pkg: unknown): string | undefined {
   if (typeof pkg !== "object" || pkg === null || Array.isArray(pkg)) return undefined;
   const envelope = (pkg as Record<string, unknown>).actionEnvelope;
   if (typeof envelope !== "object" || envelope === null || Array.isArray(envelope)) return undefined;
@@ -831,6 +930,22 @@ function isPolicyUnavailableRetryAttempt(value: unknown): value is PolicyUnavail
   );
 }
 
+function isSubmissionIdempotencyBinding(value: unknown): value is SubmissionIdempotencyBinding {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const candidate = value as Partial<SubmissionIdempotencyBinding>;
+  return (
+    (candidate.stage === "initial" || candidate.stage === "completed") &&
+    candidate.outcome === "idempotencyBound" &&
+    typeof candidate.idempotencyKey === "string" &&
+    candidate.idempotencyKey.length > 0 &&
+    candidate.idempotencyKey.length <= 128 &&
+    typeof candidate.requestFingerprint === "string" &&
+    candidate.requestFingerprint.length > 0 &&
+    typeof candidate.at === "string" &&
+    Number.isFinite(Date.parse(candidate.at))
+  );
+}
+
 function permanentCoordinationFailure(error: unknown): boolean {
   return error instanceof MpasAuthError || error instanceof CoordinationResponseError;
 }
@@ -849,11 +964,11 @@ function coordinationFailureResolution(error: unknown): { errorCode: string; err
   };
 }
 
-function actionRequestFor(record: WorkflowRecord, actionPackage: unknown): ActionRequest {
+function actionRequestFor(record: WorkflowRecord, actionPackage: unknown, idempotencyKey?: string): ActionRequest {
   return {
     version: "1",
     type: "ActionRequest",
-    idempotencyKey: record.actionIdempotencyKey,
+    idempotencyKey: idempotencyKey ?? record.actionIdempotencyKey,
     actionPackage: actionPackage as ActionPackage,
   };
 }

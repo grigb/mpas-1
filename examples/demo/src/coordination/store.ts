@@ -548,9 +548,22 @@ export class CoordinationStore {
       throw new MpasServiceError(400, "APPROVAL_DECISION_MISMATCH", "Approval decision does not match its signed payload.");
     }
 
-    // Self-approval prevention: the proposer of an action cannot approve their own action.
-    if (payload.signerDid === stored.actionPackage.actionEnvelope.proposer.did) {
-      throw new MpasServiceError(403, "SELF_APPROVAL_DENIED", "The proposer of an action cannot approve their own action.");
+    // Authentication does not grant approval authority. A proposer decision is
+    // accepted only when the Verifier's settled requirements explicitly make
+    // that DID eligible for this exact decision.
+    if (
+      payload.signerDid === stored.actionPackage.actionEnvelope.proposer.did &&
+      !isEligibleForDecision(
+        stored.authorizationRequirements.approvalRequirements,
+        payload.signerDid,
+        payload.decision,
+      )
+    ) {
+      throw new MpasServiceError(
+        403,
+        "SELF_APPROVAL_DENIED",
+        "The proposer is not authorized by the settled policy to make this decision.",
+      );
     }
 
     const prior = stored.approvals.find((entry) => entry.signerDid === payload.signerDid);
@@ -706,6 +719,16 @@ function approvedSignersFor(threshold: ThresholdRequirement, decision: Decision,
 
 function thresholdsFor(requirements: ApprovalRequirements): ThresholdRequirement[] {
   return [...(requirements.anyOf ?? []), ...(requirements.allOf ?? [])];
+}
+
+function isEligibleForDecision(requirements: ApprovalRequirements, did: Did, decision: Decision): boolean {
+  const thresholdEligible = thresholdsFor(requirements).some(
+    (threshold) => threshold.eligibleSigners.includes(did) && (threshold.decision ?? "approve") === decision,
+  );
+  const overrideEligible = (requirements.overrideSigners ?? []).some(
+    (entry) => entry.signer === did && entry.permissions.includes(decision),
+  );
+  return thresholdEligible || overrideEligible;
 }
 
 function validateActionPackageBindings(actionPackage: ActionPackage): void {
