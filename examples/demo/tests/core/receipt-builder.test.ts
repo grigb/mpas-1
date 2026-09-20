@@ -91,13 +91,13 @@ describe("buildAndSignExecutionReceipt", () => {
 
   it("keeps the positional compatibility builder bound to a valid did:jwk", async () => {
     const input = receiptInput();
-    const receipt = await buildAndSignReceipt(input.actionEnvelope, input.executionPayload, input.result, input.verifierDid, input.signingKey);
+    const receipt = await buildAndSignReceipt(input.actionEnvelope, input.executionPayload, input.result, input.verifierDid, input.signingKey!);
     expect(await verifyReceiptCanonical(receipt, { actionEnvelope: input.actionEnvelope, executionPayload: input.executionPayload, authorizedIssuers: [{ did: adapter.did }] })).toMatchObject({ ok: true });
   });
 
   it("does not let the positional compatibility builder bypass issuer binding", async () => {
     const input = receiptInput();
-    await expect(buildAndSignReceipt(input.actionEnvelope, input.executionPayload, input.result, foreign.did, input.signingKey)).rejects.toThrow();
+    await expect(buildAndSignReceipt(input.actionEnvelope, input.executionPayload, input.result, foreign.did, input.signingKey!)).rejects.toThrow();
   });
 
   it("accepts non-did:jwk issuer when signer identity validates", async () => {
