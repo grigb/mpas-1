@@ -10,6 +10,7 @@
  */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,6 +19,16 @@ import { fileURLToPath } from "node:url";
 const packageRoot = fileURLToPath(new URL("../..", import.meta.url));
 const checkerPath = join(packageRoot, "tests", "scripts", "check-docs.mjs");
 const readmePath = join(packageRoot, "README.md");
+
+// The checker requires the built SDK (dist/).  In CI's test job the SDK is
+// tested before it is built, so build on demand if dist/ is absent.
+if (!existsSync(join(packageRoot, "dist", "index.js"))) {
+  const build = spawn("npm", ["run", "build"], { cwd: packageRoot, stdio: "inherit" });
+  await new Promise((resolve, reject) => {
+    build.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`build exited ${code}`))));
+    build.on("error", reject);
+  });
+}
 
 function runChecker(readme) {
   return new Promise((resolve, reject) => {
