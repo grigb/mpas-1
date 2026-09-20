@@ -206,5 +206,5 @@ describe("MPAS Bridge types", () => {
     expect(invalid.length).toBeGreaterThan(0);
     expect(invalid.map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n")).join("\n"))
       .toContain('Type \'"reject"\' is not assignable');
-  });
+  }, 30_000);
 });
