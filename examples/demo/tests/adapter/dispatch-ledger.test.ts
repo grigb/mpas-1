@@ -3,7 +3,6 @@ import { chmodSync, lstatSync, mkdtempSync, readFileSync, realpathSync, symlinkS
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { realpathSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { execFile, fork, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
