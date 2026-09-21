@@ -245,6 +245,62 @@ describe("loadDeploymentConfigs", () => {
       },
     });
   });
+
+  it.each([
+    { type: "auto", clientId: "synthetic-static-client" },
+    { type: "static", clientId: "synthetic-static-client" },
+    { type: "cimd", clientIdMetadataDocument: "https://adapter.example/oauth/client.json" },
+    { type: "dynamic" },
+  ])("accepts managed OAuth client mode $type with explicit owner and sharing", async (client) => {
+    const { configDir } = await tempFixtureConfigDir();
+    const config = await readJson<Record<string, any>>(
+      join(fixturesDir, "configs", "github-mirror-adapter-config.json"),
+    );
+    config.plugin.path = "../plugins/github-mirror-plugin.json";
+    config.executionTarget = {
+      type: "mcp.http",
+      url: "https://mcp.example/mcp",
+      auth: {
+        type: "oauth2",
+        session: "synthetic-session",
+        scopes: ["mcp:tools"],
+        scopePolicy: "fixed",
+        client,
+        owner: "local-os-user:501",
+        sharing: {
+          applicationDids: [config.target.applicationDid],
+          operatorPrincipals: ["local-os-user:501"],
+        },
+        refresh: { safetyWindowMs: 60_000, jitterMaxMs: 30_000 },
+      },
+    };
+    await writeJson(join(configDir, "managed-oauth.json"), config);
+
+    await expect(loadDeploymentConfigs(configDir, { confirmPluginUse: approvePluginUse }))
+      .resolves.toMatchObject({ ok: true });
+  });
+
+  it("rejects inline OAuth client secrets and sharing that excludes the deployment", async () => {
+    const { configDir } = await tempFixtureConfigDir();
+    const config = await readJson<Record<string, any>>(
+      join(fixturesDir, "configs", "github-mirror-adapter-config.json"),
+    );
+    config.plugin.path = "../plugins/github-mirror-plugin.json";
+    config.executionTarget = {
+      type: "mcp.http",
+      url: "https://mcp.example/mcp",
+      auth: {
+        type: "oauth2",
+        session: "synthetic-session",
+        client: { type: "static", clientId: "synthetic", clientSecret: "inline-secret" },
+        sharing: { applicationDids: ["did:web:other.example"] },
+      },
+    };
+    await writeJson(join(configDir, "managed-oauth.json"), config);
+
+    await expect(loadDeploymentConfigs(configDir, { confirmPluginUse: approvePluginUse }))
+      .resolves.toMatchObject({ ok: false, error: { code: "CONFIG_SCHEMA_INVALID" } });
+  });
 });
 
 describe("duplicate applicationDid", () => {
