@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import type { ExecutionPayload } from "../types/mpas.js";
+import { strictJsonParse } from "../utils/strict-json.js";
 
 export interface MpasApplicationPlugin {
   version: "1";
@@ -145,7 +146,7 @@ export async function loadPlugin(path: string): Promise<LoadPluginResult> {
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(raw);
+    parsed = strictJsonParse(raw);
   } catch (error) {
     return loadError("PLUGIN_INVALID_JSON", `Plugin is not valid JSON: ${path}`, path, error);
   }

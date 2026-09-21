@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -7,6 +8,7 @@ import {
   AdapterClient,
   AdapterResponseError,
   AdapterUnavailableError,
+  loadPlugin,
   type ActionPackage,
   type AdapterResponse,
 } from "../../src/index.js";
@@ -127,6 +129,58 @@ describe("AdapterClient", () => {
       });
     } finally {
       await server.close();
+    }
+  });
+
+  it("strictly parses application plugin files while preserving load diagnostics", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mpas-plugin-loader-"));
+    const path = join(directory, "plugin.json");
+    const plugin = {
+      version: "1",
+      type: "MpasApplicationPlugin",
+      pluginDid: "did:web:plugins.example:github",
+      pluginVersion: "1.0.0",
+      publisherDid: "did:web:publisher.example",
+      applicationDid: "did:web:github.com",
+      executionProfile: {
+        id: "did:web:profiles.example:mcp",
+        protocolVersion: "2024-11-05",
+      },
+      operations: {
+        create_issue: {
+          executionPayloadSchema: { type: "object" },
+        },
+      },
+    };
+    const valid = JSON.stringify(plugin);
+    const duplicateDocuments = [
+      valid.replace(
+        '"type":"MpasApplicationPlugin"',
+        '"type":"MpasApplicationPlugin","type":"MpasApplicationPlugin"',
+      ),
+      valid.replace(
+        '"id":"did:web:profiles.example:mcp"',
+        '"id":"did:web:profiles.example:mcp","id":"did:web:profiles.example:mcp"',
+      ),
+      valid.replace(
+        '"type":"MpasApplicationPlugin"',
+        '"type":"MpasApplicationPlugin","\\u0074ype":"MpasApplicationPlugin"',
+      ),
+    ];
+
+    try {
+      await writeFile(path, valid);
+      await expect(loadPlugin(path)).resolves.toMatchObject({ ok: true, plugin });
+
+      for (const document of duplicateDocuments) {
+        await writeFile(path, document);
+        await expect(loadPlugin(path)).resolves.toMatchObject({
+          ok: false,
+          error: { code: "PLUGIN_INVALID_JSON", path },
+        });
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
     }
   });
 });

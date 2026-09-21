@@ -89,6 +89,74 @@ describe("routing clients", () => {
     } satisfies Partial<ActionEndpointClientError>);
   });
 
+  it("strictly parses Action responses in the direct and shared transport clients", async () => {
+    const valid = JSON.stringify(actionResponse());
+    const duplicateResponses = [
+      valid.replace('"type":"ActionResponse"', '"type":"ActionResponse","type":"ActionResponse"'),
+      valid.replace(
+        `"did":"${verifier}"`,
+        `"did":"${verifier}","did":"${verifier}"`,
+      ),
+      valid.replace(
+        '"type":"ActionResponse"',
+        '"type":"ActionResponse","\\u0074ype":"ActionResponse"',
+      ),
+    ];
+    const envelope = buildDeliveryEnvelope({ sender: proposer, recipients: [verifier], payload: actionRequest() });
+
+    for (const rawResponse of duplicateResponses) {
+      const server = await mockServer((_request, response) => {
+        response.statusCode = 200;
+        response.end(rawResponse);
+      });
+      await expect(
+        new ActionEndpointClient({ url: server.url }).submitActionRequest(actionRequest()),
+      ).rejects.toMatchObject({
+        name: "ActionEndpointClientError",
+        message: "Action endpoint response was not valid JSON.",
+      });
+      await expect(
+        new ActionRelayClient({ url: server.url, participantDid: proposer }).submitAction(envelope),
+      ).rejects.toMatchObject({ name: "ActionRelayResponseError" });
+    }
+  });
+
+  it("strictly parses error responses before selecting an authentication code", async () => {
+    const valid = JSON.stringify({
+      version: "1",
+      type: "MpasHttpError",
+      error: { code: "custom_denial", message: "Denied." },
+    });
+    const validServer = await mockServer((_request, response) => {
+      response.statusCode = 401;
+      response.end(valid);
+    });
+    await expect(
+      new ActionRelayClient({ url: validServer.url, participantDid: verifier }).pollDeliveries(),
+    ).rejects.toMatchObject({ name: "MpasAuthError", authCode: "custom_denial" });
+
+    const duplicateErrors = [
+      valid.replace('"type":"MpasHttpError"', '"type":"MpasHttpError","type":"MpasHttpError"'),
+      valid.replace(
+        '"code":"custom_denial"',
+        '"code":"first_denial","code":"custom_denial"',
+      ),
+      valid.replace(
+        '"type":"MpasHttpError"',
+        '"type":"MpasHttpError","\\u0074ype":"MpasHttpError"',
+      ),
+    ];
+    for (const rawResponse of duplicateErrors) {
+      const server = await mockServer((_request, response) => {
+        response.statusCode = 401;
+        response.end(rawResponse);
+      });
+      await expect(
+        new ActionRelayClient({ url: server.url, participantDid: verifier }).pollDeliveries(),
+      ).rejects.toMatchObject({ name: "MpasAuthError", authCode: "signature_invalid" });
+    }
+  });
+
   it("polls and returns Verifier deliveries through the Action Relay client", async () => {
     const requestEnvelope = buildDeliveryEnvelope({ sender: proposer, recipients: [verifier], payload: actionRequest() });
     let delivered: unknown;
@@ -153,6 +221,21 @@ describe("routing clients", () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(received).toEqual(["CoordinationWorkAvailable"]);
+
+    for (const data of [
+      '{"version":"1","type":"CoordinationWorkAvailable","type":"CoordinationWorkAvailable"}',
+      '{"version":"1","type":"CoordinationWorkAvailable","context":{"label":"first","label":"second"}}',
+      '{"version":"1","type":"CoordinationWorkAvailable","\\u0074ype":"CoordinationWorkAvailable"}',
+    ]) {
+      socket.emit("message", { data });
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(received).toEqual(["CoordinationWorkAvailable"]);
+    expect(socket.closes).toEqual([
+      { code: 1003, reason: "invalid MPAS notification" },
+      { code: 1003, reason: "invalid MPAS notification" },
+      { code: 1003, reason: "invalid MPAS notification" },
+    ]);
     expect(context.coordinationUrl).toBe(server.url);
   });
 
@@ -186,6 +269,21 @@ describe("routing clients", () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(received).toEqual(["RelayWorkAvailable"]);
+
+    for (const data of [
+      '{"version":"1","type":"RelayWorkAvailable","type":"RelayWorkAvailable"}',
+      '{"version":"1","type":"RelayWorkAvailable","context":{"label":"first","label":"second"}}',
+      '{"version":"1","type":"RelayWorkAvailable","\\u0074ype":"RelayWorkAvailable"}',
+    ]) {
+      socket.emit("message", { data });
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(received).toEqual(["RelayWorkAvailable"]);
+    expect(socket.closes).toEqual([
+      { code: 1003, reason: "invalid MPAS notification" },
+      { code: 1003, reason: "invalid MPAS notification" },
+      { code: 1003, reason: "invalid MPAS notification" },
+    ]);
     expect(context.relayUrl).toBe(server.url);
   });
 
@@ -228,7 +326,10 @@ describe("routing clients", () => {
 
 class FakeSocket implements CoordinationWebSocket {
   private readonly listeners = new Map<string, Array<(event: unknown) => void>>();
-  close(): void {}
+  readonly closes: Array<{ code?: number; reason?: string }> = [];
+  close(code?: number, reason?: string): void {
+    this.closes.push({ code, reason });
+  }
   addEventListener(type: "message" | "close" | "error", listener: (event: unknown) => void): void {
     const listeners = this.listeners.get(type) ?? [];
     listeners.push(listener);
