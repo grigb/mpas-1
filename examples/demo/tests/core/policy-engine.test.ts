@@ -124,6 +124,8 @@ describe("evaluatePolicy", () => {
     const { actionPackage, verifiedApprovals } = await verifiedFixture("insufficient-approvals.json");
     const proposerDid = actionPackage.actionEnvelope.proposer.did;
 
+    // Isolate threshold counting from the separate contradictory-decision rule.
+    verifiedApprovals.approvals = verifiedApprovals.approvals.filter((entry) => entry.signerDid !== proposerDid);
     // Inject a fake self-approval from the proposer
     verifiedApprovals.approvals.push({
       approval: {} as never,

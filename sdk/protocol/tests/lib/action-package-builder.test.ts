@@ -8,6 +8,8 @@ import {
   ActionPackageBuilder,
   computeJsonHash,
   KeyManager,
+  verifyActionPackage,
+  type TrustedExecutionProfile,
   type AdditionalApprovalsAuthorizationRequirements,
   type CanonicalApprovalPayload,
   type Did,
@@ -145,7 +147,7 @@ describe("ActionPackageBuilder", () => {
     })).rejects.toThrow("do not bind to the Action being replaced");
   });
 
-  it("builds the other Core-permitted proposer decision and keeps canonical JWS bytes", async () => {
+  it("keeps the initial propose decision and canonical JWS bytes", async () => {
     const keyManager = await KeyManager.fromFile(join(fixturesDir, "keys", "proposer.json"));
     const proposer = await readJson<KeyFixture>(join(fixturesDir, "keys", "proposer.json"));
     const builder = new ActionPackageBuilder({
@@ -155,7 +157,6 @@ describe("ActionPackageBuilder", () => {
         format: "mcp.toolsCall",
       },
       keyManager,
-      proposerDecision: "approve",
     });
 
     const actionPackage = await builder.buildFromToolCall("create_issue", {});
@@ -164,9 +165,51 @@ describe("ActionPackageBuilder", () => {
     const verified = await compactVerify(approval.signature.value, publicKey);
     const payloadText = Buffer.from(verified.payload).toString("utf8");
 
-    expect(approval.decision).toBe("approve");
-    expect(JSON.parse(payloadText)).toMatchObject({ decision: "approve", signerDid: proposer.did });
+    expect(approval.decision).toBe("propose");
+    expect(JSON.parse(payloadText)).toMatchObject({ decision: "propose", signerDid: proposer.did });
     expect(payloadText).toBe(canonicalize(JSON.parse(payloadText)));
+  });
+
+  it("uses the trusted execution profile's payload and hash rules", async () => {
+    const keyManager = await KeyManager.fromFile(join(fixturesDir, "keys", "proposer.json"));
+    const profile: TrustedExecutionProfile = {
+      id: "did:example:text-profile", format: "text",
+      validatePayload: (payload) => typeof payload === "string",
+      hashPayload: (payload) => computeJsonHash({ domain: "text-profile", payload }),
+    };
+    const builder = new ActionPackageBuilder({
+      applicationDid: "did:example:text-app", executionProfile: { id: profile.id, format: profile.format },
+      keyManager, hashPayload: profile.hashPayload,
+    });
+    const pkg = await builder.buildFromPayload("profile-native payload");
+    const config = {
+      trustedSigners: [{ did: keyManager.did }],
+      trustedApplicationProfiles: [{ applicationDid: "did:example:text-app" as Did, executionProfile: profile }],
+    };
+    expect(await verifyActionPackage(pkg, config)).toMatchObject({ status: "verified" });
+    expect(await verifyActionPackage(pkg, {
+      ...config,
+      trustedApplicationProfiles: [{ ...config.trustedApplicationProfiles[0], executionProfile: { ...profile, hashPayload: computeJsonHash } }],
+    })).toMatchObject({ status: "rejected", code: "PAYLOAD_HASH_MISMATCH" });
+    expect(await verifyActionPackage(pkg, {
+      ...config,
+      trustedApplicationProfiles: [{ ...config.trustedApplicationProfiles[0], executionProfile: { ...profile, validatePayload: () => false } }],
+    })).toMatchObject({ status: "rejected", code: "INVALID_EXECUTION_PAYLOAD" });
+  });
+
+  it("accepts a deployment-defined scope without prescribing its spelling", async () => {
+    const keyManager = await KeyManager.fromFile(join(fixturesDir, "keys", "proposer.json"));
+    const builder = new ActionPackageBuilder({
+      applicationDid: "did:example:app", keyManager,
+      executionProfile: { id: "did:web:profiles.oma3.org:mcp", format: "mcp.toolsCall" },
+    });
+    const payload = builder.buildPayload("create_issue", {});
+    const envelope = builder.buildEnvelope(payload);
+    envelope.actionId = { scope: "deployment workspace A", value: "42" };
+    const pkg = builder.assemblePackage(payload, envelope, await builder.signProposerApproval(envelope));
+    expect(await verifyActionPackage(pkg, {
+      trustedSigners: [{ did: keyManager.did }], trustedApplicationDids: ["did:example:app"],
+    })).toMatchObject({ status: "verified" });
   });
 
   it("rejects builder validity windows over the Core 24-hour maximum", async () => {

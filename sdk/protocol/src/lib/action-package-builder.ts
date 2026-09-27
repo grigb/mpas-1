@@ -6,7 +6,6 @@ import type {
   AdditionalApprovalsAuthorizationRequirements,
   Approval,
   CanonicalApprovalPayload,
-  Decision,
   Did,
   Hash,
   ExecutionPayload,
@@ -30,8 +29,6 @@ export interface ActionPackageBuilderConfig {
   signer?: MpasJwsSigner;
   /** Default Action validity window. Defaults to 30 minutes. */
   defaultExpirationMinutes?: number;
-  /** Initial Proposer decision. Core permits `propose` and `approve`; defaults to `propose`. */
-  proposerDecision?: Extract<Decision, "propose" | "approve">;
   /** Profile-defined payload hashing. Defaults to JSON/JCS/SHA-256 for compatibility. */
   hashPayload?: (payload: ExecutionPayload) => Hash;
 }
@@ -40,7 +37,6 @@ export interface ActionPackageBuilderConfig {
 export class ActionPackageBuilder {
   private readonly signer: MpasJwsSigner;
   private readonly defaultExpirationMinutes: number;
-  private readonly proposerDecision: Extract<Decision, "propose" | "approve">;
 
   constructor(private readonly config: ActionPackageBuilderConfig) {
     if (Boolean(config.signer) === Boolean(config.keyManager)) throw new Error("Supply exactly one signer or keyManager.");
@@ -50,7 +46,6 @@ export class ActionPackageBuilder {
     if (this.defaultExpirationMinutes <= 0 || this.defaultExpirationMinutes > 24 * 60) {
       throw new RangeError("defaultExpirationMinutes must be greater than zero and at most 1440 minutes.");
     }
-    this.proposerDecision = config.proposerDecision ?? "propose";
   }
 
   /** Builds and signs one complete Action Package for a tool name and arguments object. */
@@ -183,7 +178,7 @@ export class ActionPackageBuilder {
     const approvalPayload: CanonicalApprovalPayload = {
       type: "ApprovalPayload",
       actionEnvelopeHash,
-      decision: this.proposerDecision,
+      decision: "propose",
       signerDid: this.signer.did,
       createdAt,
     };
@@ -193,7 +188,7 @@ export class ActionPackageBuilder {
       version: "1",
       type: "Approval",
       actionEnvelopeHash,
-      decision: this.proposerDecision,
+      decision: "propose",
       signature: {
         format: "jws",
         value: signature,

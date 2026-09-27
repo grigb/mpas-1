@@ -38,8 +38,6 @@ export interface ValidationError {
 export interface TrustedSigner {
   did: Did;
   label?: string;
-  /** Authorized JWS key identifier. Required for non-did:jwk signers when publicJwk.kid is absent. */
-  kid?: string;
   /**
    * Verification key for the signer. Optional when `did` is a did:jwk — the
    * DID itself embeds the key and is the source of truth; a configured
@@ -88,9 +86,7 @@ export interface ApprovalBundleError {
     | "INVALID_SIGNATURE"
     | "APPROVAL_PAYLOAD_MISMATCH"
     | "NON_CANONICAL_APPROVAL_PAYLOAD"
-    | "KEY_ID_MISMATCH"
-    | "APPROVAL_TIME_INVALID"
-    | "CONFLICTING_SIGNER_DECISIONS";
+    | "APPROVAL_TIME_INVALID";
   message: string;
   path: string;
 }
@@ -512,7 +508,6 @@ export async function verifyApprovalBundle(
 
   const trustedByDid = new Map(trustedSigners.map((signer) => [signer.did, signer]));
   const approvals: VerifiedApproval[] = [];
-  const decisionBySigner = new Map<Did, Approval["decision"]>();
 
   for (const [index, approval] of bundle.approvals.entries()) {
     const path = `$.approvalBundle.approvals[${index}]`;
@@ -549,17 +544,8 @@ export async function verifyApprovalBundle(
       );
     }
 
-    const expectedKid = authorizedSignerKid(trustedSigner, signerJwk);
-    if (!expectedKid || decoded.protectedHeaderKid !== expectedKid) {
-      return approvalBundleError(
-        "KEY_ID_MISMATCH",
-        "Approval JWS kid does not identify the authorized Signer key.",
-        `${path}.signature.value`,
-      );
-    }
-
     try {
-      await verifySuiteCompactJws(approval.signature.value, signerJwk, expectedKid);
+      await verifySuiteCompactJws(approval.signature.value, signerJwk, verificationKid(signerJwk, trustedSigner.did));
     } catch {
       return approvalBundleError("INVALID_SIGNATURE", "Approval signature could not be verified.", `${path}.signature`);
     }
@@ -582,19 +568,6 @@ export async function verifyApprovalBundle(
     const timeError = validateApprovalTime(approval, timeOptions);
     if (timeError) {
       return approvalBundleError("APPROVAL_TIME_INVALID", timeError.message, `${path}.${timeError.field}`);
-    }
-
-    const priorDecision = decisionBySigner.get(trustedSigner.did);
-    if (priorDecision !== undefined) {
-      if (priorDecision !== approval.decision) {
-        return approvalBundleError(
-          "CONFLICTING_SIGNER_DECISIONS",
-          "One Signer supplied contradictory decisions for the same Action Envelope.",
-          `${path}.decision`,
-        );
-      }
-    } else {
-      decisionBySigner.set(trustedSigner.did, approval.decision);
     }
 
     approvals.push({
@@ -775,11 +748,11 @@ export async function verifyActionPackage(
       path: bundleResult.error.path,
     };
   }
-  const normalizedApprovals = normalizeVerifiedApprovals(bundleResult.verifiedApprovals);
-  onStep?.("approval_bundle_verification", true, { approvalCount: normalizedApprovals.approvals.length });
+  const { verifiedApprovals } = bundleResult;
+  onStep?.("approval_bundle_verification", true, { approvalCount: verifiedApprovals.approvals.length });
 
   const proposerDid = actionPackage.actionEnvelope.proposer.did;
-  const hasProposerApproval = normalizedApprovals.approvals.some(
+  const hasProposerApproval = verifiedApprovals.approvals.some(
     (verified) =>
       (verified.decision === "propose" || verified.decision === "approve") && verified.signerDid === proposerDid,
   );
@@ -799,7 +772,7 @@ export async function verifyActionPackage(
     actionId: actionPackage.actionEnvelope.actionId.value,
     applicationDid: actionPackage.actionEnvelope.target.applicationDid,
     operationName: operationNameFromPayload(actionPackage.executionPayload),
-    verifiedApprovals: normalizedApprovals,
+    verifiedApprovals,
   };
 }
 
@@ -1003,18 +976,6 @@ function hashesEqual(left: Hash, right: Hash): boolean {
   return left.alg === right.alg && left.value === right.value;
 }
 
-function normalizeVerifiedApprovals(verified: VerifiedApprovals): VerifiedApprovals {
-  const seen = new Set<Did>();
-  return {
-    actionEnvelopeHash: verified.actionEnvelopeHash,
-    approvals: verified.approvals.filter((approval) => {
-      if (seen.has(approval.signerDid)) return false;
-      seen.add(approval.signerDid);
-      return true;
-    }),
-  };
-}
-
 function isMcpToolCallPayload(payload: ExecutionPayload): boolean {
   if (!isRecord(payload) || firstUnexpectedKey(payload, ["name", "arguments"]) !== undefined) {
     return false;
@@ -1053,7 +1014,7 @@ function hasSafeReplayDomain(actionId: ActionId): boolean {
     return true;
   }
 
-  return typeof actionId.scope === "string" && (isDid(actionId.scope) || /^[a-z0-9]+:[^\s:]+:[^\s]+$/i.test(actionId.scope));
+  return typeof actionId.scope === "string" && actionId.scope.length > 0;
 }
 
 function operationNameFromPayload(payload: ExecutionPayload): string | undefined {
@@ -1080,7 +1041,7 @@ function isCanonicalApprovalPayload(value: unknown): value is CanonicalApprovalP
 }
 
 type DecodedApprovalJws =
-  | { ok: true; payload: CanonicalApprovalPayload; protectedHeaderKid: string | undefined }
+  | { ok: true; payload: CanonicalApprovalPayload }
   | {
       ok: false;
       code: Extract<ApprovalBundleError["code"], "APPROVAL_PAYLOAD_MISMATCH" | "NON_CANONICAL_APPROVAL_PAYLOAD">;
@@ -1090,10 +1051,6 @@ type DecodedApprovalJws =
 function decodeApprovalJws(approval: Approval): DecodedApprovalJws {
   try {
     const parts = approval.signature.value.split(".");
-    const headerText = Buffer.from(parts[0], "base64url").toString("utf8");
-    const header = strictJsonParse(headerText) as Record<string, unknown>;
-    const protectedHeaderKid = typeof header.kid === "string" ? header.kid : undefined;
-
     const payloadText = Buffer.from(parts[1], "base64url").toString("utf8");
     const payload = strictJsonParse(payloadText);
     if (!isCanonicalApprovalPayload(payload)) {
@@ -1114,7 +1071,6 @@ function decodeApprovalJws(approval: Approval): DecodedApprovalJws {
     return {
       ok: true,
       payload,
-      protectedHeaderKid,
     };
   } catch {
     return {
@@ -1122,17 +1078,6 @@ function decodeApprovalJws(approval: Approval): DecodedApprovalJws {
       code: "APPROVAL_PAYLOAD_MISMATCH",
       message: "Signed Approval payload is malformed.",
     };
-  }
-}
-
-function authorizedSignerKid(signer: TrustedSigner, signerJwk: JWK): string | undefined {
-  if (typeof signer.kid === "string" && signer.kid.length > 0) {
-    return signer.kid;
-  }
-  try {
-    return verificationKid(signerJwk, signer.did);
-  } catch {
-    return undefined;
   }
 }
 
