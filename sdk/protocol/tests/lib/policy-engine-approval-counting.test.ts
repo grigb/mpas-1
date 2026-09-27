@@ -245,3 +245,13 @@ describe("§6.5 rule 5 — an Approval from the Proposer MUST NOT count toward a
     );
   });
 });
+
+describe("independent final JSON authorization", () => {
+  it("excludes a cryptographically verified proposer even in the required group", async () => {
+    const approvals = await verified([
+      await approvalAt(proposerKeys, mergePackage.actionEnvelope, "approve", "2026-06-05T18:01:00.000Z"),
+    ]);
+    expect(evaluatePolicy(mergePackage, approvals, policyFor(1, [proposerDid])))
+      .toMatchObject({ status: "additionalApprovalsRequired", unsatisfiedRules: [{ found: 0 }] });
+  });
+});

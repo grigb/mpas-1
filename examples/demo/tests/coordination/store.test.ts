@@ -223,7 +223,7 @@ describe("CoordinationStore", () => {
     expect(update.progress).toMatchObject({ required: 2, collected: 0 });
   });
 
-  it("accepts a proposer Approval only when the settled policy makes that decision eligible", async () => {
+  it("rejects self-approval even when the proposer belongs to the required group", async () => {
     const request = await coordinationActionRequest();
     const store = new CoordinationStore();
     const proposer = await fixtureKey("proposer");
@@ -233,14 +233,12 @@ describe("CoordinationStore", () => {
     store.createWorkflow(request);
 
     const selfApproval = await signApproval(request.authorizationRequirements.actionEnvelopeHash, proposer, "approve");
-    const response = store.submitApproval({
+    expect(() => store.submitApproval({
       version: "1",
       type: "CoordinationApprovalSubmission",
       actionEnvelopeHash: request.authorizationRequirements.actionEnvelopeHash,
       approval: selfApproval,
-    });
-
-    expect(response).toMatchObject({ accepted: true, state: "readyForSubmission" });
+    })).toThrowError(expect.objectContaining({ code: "SELF_APPROVAL_DENIED", statusCode: 403 }));
   });
 
   it("denies a proposer decision that the settled policy does not authorize", async () => {
