@@ -7,6 +7,7 @@ import type {
   Approval,
   CanonicalApprovalPayload,
   Did,
+  Hash,
   ExecutionPayload,
 } from "../types/mpas.js";
 import { computeJsonHash } from "../utils/hash.js";
@@ -28,6 +29,8 @@ export interface ActionPackageBuilderConfig {
   signer?: MpasJwsSigner;
   /** Default Action validity window. Defaults to 30 minutes. */
   defaultExpirationMinutes?: number;
+  /** Profile-defined payload hashing. Defaults to JSON/JCS/SHA-256 for compatibility. */
+  hashPayload?: (payload: ExecutionPayload) => Hash;
 }
 
 /** Builds complete, Proposer-signed Action Packages from MCP tool calls. */
@@ -40,14 +43,23 @@ export class ActionPackageBuilder {
     this.signer = config.signer ?? config.keyManager!;
     validateSignerIdentity(this.signer);
     this.defaultExpirationMinutes = config.defaultExpirationMinutes ?? 30;
+    if (this.defaultExpirationMinutes <= 0 || this.defaultExpirationMinutes > 24 * 60) {
+      throw new RangeError("defaultExpirationMinutes must be greater than zero and at most 1440 minutes.");
+    }
   }
 
   /** Builds and signs one complete Action Package for a tool name and arguments object. */
   async buildFromToolCall(toolName: string, args: object): Promise<ActionPackage> {
-    const payload = this.createPayload(toolName, args);
+    return this.buildFromPayload(this.createPayload(toolName, args));
+
+
+
+  }
+
+  /** Builds and signs one complete Action Package from a profile-native payload. */
+  async buildFromPayload(payload: ExecutionPayload): Promise<ActionPackage> {
     const envelope = this.createEnvelope(payload);
     const approval = await this.createProposerApproval(envelope);
-
     return this.createPackage(payload, envelope, approval);
   }
 
@@ -139,7 +151,7 @@ export class ActionPackageBuilder {
         applicationDid: this.config.applicationDid,
       },
       executionProfile: this.config.executionProfile,
-      executionPayloadHash: computeJsonHash(payload),
+      executionPayloadHash: (this.config.hashPayload ?? computeJsonHash)(payload),
       actionId: {
         value: `urn:uuid:${randomUUID()}`,
       },
@@ -153,7 +165,7 @@ export class ActionPackageBuilder {
     const expiresAt = new Date(now.getTime() + this.defaultExpirationMinutes * 60 * 1000);
     return {
       ...structuredClone(prior),
-      executionPayloadHash: computeJsonHash(payload),
+      executionPayloadHash: (this.config.hashPayload ?? computeJsonHash)(payload),
       actionId: { value: `urn:uuid:${randomUUID()}` },
       createdAt: now.toISOString(),
       expiresAt: expiresAt.toISOString(),

@@ -40,6 +40,8 @@ export interface HttpEndpointOptions {
   adapterSigner?: MpasJwsSigner;
   ledger?: DispatchLedger;
   maxEnvelopeValidityMs?: number;
+  /** Deterministic clock for testing. Defaults to Date.now(). */
+  now?: number;
   traceLogger?: TraceLogger;
 }
 
@@ -52,6 +54,7 @@ export function createAdapterApiServer(options: HttpEndpointOptions): FastifyIns
   const app = Fastify({ logger: false });
   const ledger = options.ledger ?? new DispatchLedger();
   const maxEnvelopeValidityMs = options.maxEnvelopeValidityMs ?? DEFAULT_MAX_ENVELOPE_VALIDITY_MS;
+  const fixedNow = options.now;
   const trace = options.traceLogger ?? new TraceLogger("adapter");
 
   // Accept the canonical MPAS media type as well as application/json (profile MAY).
@@ -144,7 +147,7 @@ export function createAdapterApiServer(options: HttpEndpointOptions): FastifyIns
     }
 
     // Stateless deterministic rejections (record nothing, repeatable verdict).
-    if (isActionEnvelopeExpired(pkg.actionEnvelope)) {
+    if (isActionEnvelopeExpired(pkg.actionEnvelope, fixedNow)) {
       trace.emit("verification_step", { actionId, step: "expiry_check", passed: false });
       return rejection(pkg, options, envelopeHash, "expired", "EXPIRED_ACTION_ENVELOPE", "Action Envelope is expired.");
     }
@@ -171,7 +174,7 @@ export function createAdapterApiServer(options: HttpEndpointOptions): FastifyIns
     }
     trace.emit("verification_step", { actionId, step: "execution_profile_check", passed: true });
 
-    if (exceedsMaxEnvelopeValidity(pkg.actionEnvelope, maxEnvelopeValidityMs)) {
+    if (exceedsMaxEnvelopeValidity(pkg.actionEnvelope, maxEnvelopeValidityMs, fixedNow)) {
       trace.emit("verification_step", { actionId, step: "max_validity_check", passed: false });
       return actionResponse(options, {
         result: "rejected",
@@ -184,6 +187,8 @@ export function createAdapterApiServer(options: HttpEndpointOptions): FastifyIns
     const verification = await verifyActionPackage(pkg, {
       trustedSigners: loadedConfig.config.signerKeys,
       trustedApplicationDids: [loadedConfig.config.target.applicationDid],
+      now: fixedNow,
+      maxEnvelopeValidityMs,
       onStep: (step, passed, details) => {
         trace.emit("verification_step", { actionId, step, passed, ...details });
       },

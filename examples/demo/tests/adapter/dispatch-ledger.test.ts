@@ -14,9 +14,53 @@ const terminalResponse: ActionResponse = {
 };
 
 describe("DispatchLedger", () => {
+  it("tracks the same local identifier independently in two deployment scopes", () => {
+    const ledger = new DispatchLedger();
+    const first = { scope: "workspace A", value: "42" };
+    const second = { scope: "workspace B", value: "42" };
+    ledger.authorizeDispatch(first, "hashA", expiresAt);
+    expect(ledger.check(second, "hashB").kind).toBe("absent");
+    expect(ledger.check(first, "hashA").kind).toBe("pending");
+  });
+
   it("treats an unknown actionId as absent (full verification proceeds)", () => {
     const ledger = new DispatchLedger();
     expect(ledger.check(actionId, "hashA").kind).toBe("absent");
+  });
+
+  it("keeps delimiter-containing scope and ID pairs separate across restart", () => {
+    const journal = new MemoryDispatchJournal();
+    const ledger = new DispatchLedger(journal);
+    const first = { scope: "workspace:child", value: "42" };
+    const second = { scope: "workspace", value: "child:42" };
+    expect(ledger.authorizeDispatch(first, "hashA", expiresAt).kind).toBe("absent");
+    expect(ledger.authorizeDispatch(second, "hashB", expiresAt).kind).toBe("absent");
+    ledger.resolve(first, "executed");
+    ledger.resolve(second, "failed");
+
+    const reloaded = new DispatchLedger(journal);
+    expect(reloaded.size()).toBe(2);
+    expect(reloaded.recoveryFor(first, "hashA")).toEqual({ resolution: "executed" });
+    expect(reloaded.recoveryFor(second, "hashB")).toEqual({ resolution: "failed" });
+  });
+
+  it("distinguishes an unscoped DID from a scoped value with the same former flattened key", () => {
+    const ledger = new DispatchLedger();
+    ledger.authorizeDispatch({ value: "did:example:42" }, "hashA", expiresAt);
+    expect(ledger.check({ scope: "did:example", value: "42" }, "hashB").kind).toBe("absent");
+  });
+
+  it("conservatively preserves replay rejection for ambiguous legacy scoped entries", () => {
+    const journal = new MemoryDispatchJournal([
+      { event: "executing", actionId: "workspace:child:42", envelopeHash: "hashA", expiresAt, at: "2026-06-12T00:00:00.000Z" },
+    ]);
+    const first = { scope: "workspace:child", value: "42" };
+    const second = { scope: "workspace", value: "child:42" };
+    for (const ledger of [new DispatchLedger(journal), new DispatchLedger(journal)]) {
+      expect(ledger.check(first, "hashA")).toMatchObject({ kind: "reject", code: "REPLAY_DETECTED" });
+      expect(ledger.check(second, "hashB")).toMatchObject({ kind: "reject", code: "REPLAY_DETECTED" });
+    }
+    expect(journal.readAll().filter((event) => event.event === "resolved")).toHaveLength(1);
   });
 
   it("only one of two same-actionId submissions can authorize dispatch", () => {

@@ -109,6 +109,16 @@ export class CoordinationStore {
     expiresAt: number;
   }>();
   private nextDeliverySequence = 1;
+  /** Deterministic clock for testing. Undefined means live Date.now(). */
+  private readonly fixedNow?: number;
+
+  constructor(options?: { now?: number }) {
+    this.fixedNow = options?.now;
+  }
+
+  private now(): number {
+    return this.fixedNow ?? Date.now();
+  }
 
   runIdempotent<T>(
     service: "relay" | "coordination",
@@ -118,7 +128,7 @@ export class CoordinationStore {
     operation: () => T | Promise<T>,
   ): Promise<T> {
     if (!key) return Promise.resolve().then(operation);
-    const now = Date.now();
+    const now = this.now();
     for (const [cachedScope, entry] of this.idempotency) {
       if (entry.expiresAt <= now) this.idempotency.delete(cachedScope);
     }
@@ -236,7 +246,7 @@ export class CoordinationStore {
       );
     }
     if (requirements) {
-      validateAuthorizationRequirements(requirements, stored.actionRef.actionEnvelopeHash, stored.verifierDid);
+      validateAuthorizationRequirements(requirements, stored.actionRef.actionEnvelopeHash, stored.verifierDid, this.fixedNow);
     }
 
     const authorizedRecipients = new Set<Did>([
@@ -307,7 +317,10 @@ export class CoordinationStore {
     }
 
     if (stored.state === "awaitingApprovals") {
-      const status = evaluateApprovalRequirements(stored.authorizationRequirements.approvalRequirements, stored.approvals);
+      const status = evaluateApprovalRequirements(
+        stored.authorizationRequirements.approvalRequirements,
+        stored.approvals.filter((entry) => entry.signerDid !== stored.actionPackage.actionEnvelope.proposer.did),
+      );
       if (status === "satisfied") {
         stored.state = "readyForSubmission";
         stored.updatedAt = new Date().toISOString();
@@ -360,7 +373,7 @@ export class CoordinationStore {
     const deliveries = this.deliveries
       .filter((entry) => entry.sequence > after)
       .filter((entry) => entry.recipient === did)
-      .filter((entry) => entry.envelope.expiresAt === undefined || Date.parse(entry.envelope.expiresAt) > Date.now())
+      .filter((entry) => entry.envelope.expiresAt === undefined || Date.parse(entry.envelope.expiresAt) > this.now())
       .slice(0, DELIVERY_PAGE_SIZE);
     const nextCursor = deliveries.length > 0 ? String(deliveries.at(-1)!.sequence) : undefined;
     return {
@@ -395,7 +408,7 @@ export class CoordinationStore {
   validateCreateWorkflow(request: CoordinationActionRequest): void {
     validateActionPackageBindings(request.actionPackage);
     const actionEnvelopeHash = computeJsonHash(request.actionPackage.actionEnvelope);
-    validateAuthorizationRequirements(request.authorizationRequirements, actionEnvelopeHash);
+    validateAuthorizationRequirements(request.authorizationRequirements, actionEnvelopeHash, undefined, this.fixedNow);
     const actionId = request.actionPackage.actionEnvelope.actionId.value;
     const existingById = this.actionsById.get(actionId);
     if (existingById && existingById.actionRef.actionEnvelopeHash.value !== actionEnvelopeHash.value) {
@@ -471,7 +484,7 @@ export class CoordinationStore {
   hasOutstandingRelayWork(did: Did): boolean {
     return this.deliveries.some((entry) =>
       entry.recipient === did &&
-      (entry.envelope.expiresAt === undefined || Date.parse(entry.envelope.expiresAt) > Date.now()));
+      (entry.envelope.expiresAt === undefined || Date.parse(entry.envelope.expiresAt) > this.now()));
   }
 
   routingAudit(): RoutingAuditEntry[] {
@@ -503,7 +516,7 @@ export class CoordinationStore {
     });
   }
 
-  private expireIfNeeded(stored: StoredAction, now = Date.now()): void {
+  private expireIfNeeded(stored: StoredAction, now = this.now()): void {
     if (stored.state === "cancelled" || stored.state === "expired" || stored.state === "rejected") {
       return;
     }
@@ -515,7 +528,7 @@ export class CoordinationStore {
     }
   }
 
-  private effectiveState(stored: StoredAction, now = Date.now()): CoordinationState {
+  private effectiveState(stored: StoredAction, now = this.now()): CoordinationState {
     if (stored.state === "cancelled" || stored.state === "expired" || stored.state === "rejected") return stored.state;
     const expiresAt = Date.parse(stored.actionPackage.actionEnvelope.expiresAt);
     return !Number.isNaN(expiresAt) && expiresAt <= now ? "expired" : stored.state;
@@ -548,9 +561,13 @@ export class CoordinationStore {
       throw new MpasServiceError(400, "APPROVAL_DECISION_MISMATCH", "Approval decision does not match its signed payload.");
     }
 
-    // Self-approval prevention: the proposer of an action cannot approve their own action.
+    // This coordination store implements the JSON policy profile: group membership cannot permit self-approval.
     if (payload.signerDid === stored.actionPackage.actionEnvelope.proposer.did) {
-      throw new MpasServiceError(403, "SELF_APPROVAL_DENIED", "The proposer of an action cannot approve their own action.");
+      throw new MpasServiceError(
+        403,
+        "SELF_APPROVAL_DENIED",
+        "The proposer cannot approve their own action under the JSON policy profile.",
+      );
     }
 
     const prior = stored.approvals.find((entry) => entry.signerDid === payload.signerDid);
@@ -737,6 +754,7 @@ function validateAuthorizationRequirements(
   requirements: AuthorizationRequirements,
   actionEnvelopeHash: Hash,
   verifierDid?: Did,
+  now?: number,
 ): void {
   const raw = requirements as unknown as Record<string, unknown>;
   if (!isRecord(raw.actionEnvelopeHash) ||
@@ -782,7 +800,7 @@ function validateAuthorizationRequirements(
     if (Number.isNaN(expiresAt)) {
       throw new MpasServiceError(400, "INVALID_REQUEST", "Authorization Requirements expiry is invalid.");
     }
-    if (expiresAt <= Date.now()) {
+    if (expiresAt <= (now ?? Date.now())) {
       throw new MpasServiceError(409, "expired", "Authorization Requirements are expired.");
     }
   }

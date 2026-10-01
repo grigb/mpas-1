@@ -44,10 +44,14 @@ async function trustedSigners(): Promise<TrustedSigner[]> {
   ];
 }
 
+/** Deterministic clock pinned inside the fixture validity window. */
+const FIXTURE_NOW = Date.parse("2026-06-05T19:00:00.000Z");
+
 async function verificationConfig(): Promise<VerificationConfig> {
   return {
     trustedSigners: await trustedSigners(),
     trustedApplicationDids: ["did:web:github-mirror.example"],
+    now: FIXTURE_NOW,
   };
 }
 
@@ -120,6 +124,8 @@ describe("evaluatePolicy", () => {
     const { actionPackage, verifiedApprovals } = await verifiedFixture("insufficient-approvals.json");
     const proposerDid = actionPackage.actionEnvelope.proposer.did;
 
+    // Isolate threshold counting from the separate contradictory-decision rule.
+    verifiedApprovals.approvals = verifiedApprovals.approvals.filter((entry) => entry.signerDid !== proposerDid);
     // Inject a fake self-approval from the proposer
     verifiedApprovals.approvals.push({
       approval: {} as never,
