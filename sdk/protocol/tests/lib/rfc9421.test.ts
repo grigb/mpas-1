@@ -187,6 +187,34 @@ describe("MPAS RFC 9421", () => {
     }
   });
 
+  it("rejects duplicate members before interpreting the signed audience body", async () => {
+    const signer = await fixtureSigner("proposer");
+    const valid = JSON.stringify({
+      version: "1",
+      type: "CoordinationPollRequest",
+      did: signer.did,
+      audience,
+    });
+    const validBody = Buffer.from(valid);
+    const validHeaders = await rawSign(signer, validBody, { params: validParams(signer.did) });
+    await expectVerified(validHeaders, validBody, signer.did);
+
+    const duplicateBodies = [
+      valid.replace(`"audience":"${audience}"`, `"audience":"https://first.example","audience":"${audience}"`),
+      valid.replace(/}$/, ',"context":{"label":"first","label":"second"}}'),
+      valid.replace(`"audience":"${audience}"`, `"audience":"https://first.example","\\u0061udience":"${audience}"`),
+    ];
+    for (const text of duplicateBodies) {
+      const body = Buffer.from(text);
+      const headers = await rawSign(signer, body, { params: validParams(signer.did) });
+      await expect(verify(headers, body)).resolves.toMatchObject({
+        ok: false,
+        status: 401,
+        reason: "audience_invalid",
+      });
+    }
+  });
+
   it.each([
     ["equal timestamps", { created: epoch(now), expires: epoch(now) }],
     ["reversed timestamps", { created: epoch(now), expires: epoch(now) - 1 }],

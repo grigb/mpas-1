@@ -1,9 +1,10 @@
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { JWK } from "jose";
 import { describe, expect, it } from "vitest";
-import { KeyManager } from "../../src/index.js";
+import { didJwkToJwk, DuplicateJsonKeyError, KeyManager } from "../../src/index.js";
 import type { Did } from "../../src/index.js";
 
 const fixturesDir = fileURLToPath(new URL("../fixtures/", import.meta.url));
@@ -66,5 +67,52 @@ describe("KeyManager", () => {
         await rm(path);
       }),
     );
+  });
+
+  it("strictly parses the JWK embedded in did:jwk while preserving its public error", async () => {
+    const fixture = await readJson<KeyFixture>(join(fixturesDir, "keys", "proposer.json"));
+    const valid = JSON.stringify(fixture.publicJwk);
+    const did = `did:jwk:${Buffer.from(valid).toString("base64url")}`;
+    expect(didJwkToJwk(did)).toMatchObject(fixture.publicJwk);
+
+    const duplicateDocuments = [
+      valid.replace('"kty":"OKP"', '"kty":"OKP","kty":"OKP"'),
+      valid.replace(/}$/, ',"metadata":{"label":"first","label":"second"}}'),
+      valid.replace('"kty":"OKP"', '"kty":"OKP","\\u006bty":"OKP"'),
+    ];
+    for (const document of duplicateDocuments) {
+      const duplicateDid = `did:jwk:${Buffer.from(document).toString("base64url")}`;
+      expect(() => didJwkToJwk(duplicateDid)).toThrow(
+        "did:jwk payload is not valid base64url-encoded JSON.",
+      );
+    }
+  });
+
+  it("strictly parses direct and fixture-wrapped key files", async () => {
+    const fixture = await readJson<KeyFixture>(join(fixturesDir, "keys", "proposer.json"));
+    const directory = await mkdtemp(join(tmpdir(), "mpas-key-manager-"));
+    const path = join(directory, "key.json");
+    const valid = JSON.stringify(fixture.privateJwk);
+    const nestedDuplicate = JSON.stringify({ privateJwk: fixture.privateJwk }).replace(
+      `"x":${JSON.stringify(fixture.privateJwk.x)}`,
+      `"x":${JSON.stringify(fixture.privateJwk.x)},"x":${JSON.stringify(fixture.privateJwk.x)}`,
+    );
+    const duplicateDocuments = [
+      valid.replace('"kty":"OKP"', '"kty":"OKP","kty":"OKP"'),
+      nestedDuplicate,
+      valid.replace('"kty":"OKP"', '"kty":"OKP","\\u006bty":"OKP"'),
+    ];
+
+    try {
+      await writeFile(path, valid);
+      await expect(KeyManager.fromFile(path)).resolves.toMatchObject({ did: fixture.did });
+
+      for (const document of duplicateDocuments) {
+        await writeFile(path, document);
+        await expect(KeyManager.fromFile(path)).rejects.toBeInstanceOf(DuplicateJsonKeyError);
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 });

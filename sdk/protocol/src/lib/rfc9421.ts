@@ -10,6 +10,7 @@ import {
   type Item,
 } from "structured-headers";
 import type { Did } from "../types/mpas.js";
+import { strictJsonParse } from "../utils/strict-json.js";
 import { didJwkToJwk } from "./did-jwk.js";
 import { resolveHttpSigner, signMpasBytes, type MpasHttpSigner } from "./signer.js";
 import { validatePublicJwk, verifySuiteBytes } from "./signature-suites.js";
@@ -339,7 +340,7 @@ function verifyContentDigest(headers: MpasHeaders, body: Uint8Array): "valid" | 
 
 function validAudience(body: Uint8Array, audiences: readonly string[] | ReadonlySet<string>): boolean {
   try {
-    const parsed = JSON.parse(Buffer.from(body).toString("utf8")) as unknown;
+    const parsed = strictJsonParse(Buffer.from(body).toString("utf8"));
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return false;
     const audience = (parsed as Record<string, unknown>).audience;
     if (typeof audience !== "string") return false;

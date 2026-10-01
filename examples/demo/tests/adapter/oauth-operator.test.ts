@@ -1,5 +1,5 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -14,6 +14,7 @@ const applicationDid = "did:web:netlify.example";
 const resourceUrl = "https://mcp.netlify.com/mcp";
 const session = "netlify-production";
 const credentialHandle = "netlify-oauth-token";
+const operatorPrincipal = `local-os-user:${typeof process.getuid === "function" ? String(process.getuid()) : userInfo().username}`;
 
 async function writeDeployment(configDir: string, value: unknown, name = "app.json"): Promise<void> {
   await writeFile(join(configDir, name), `${JSON.stringify(value)}\n`);
@@ -34,12 +35,14 @@ async function writeSessionFile(
   handle: string,
   sessionValue: Record<string, unknown>,
 ): Promise<void> {
-  await writeFile(join(credentialDir, `${handle}.json`), `${JSON.stringify(sessionValue)}\n`);
+  const path = join(credentialDir, `${handle}.json`);
+  await writeFile(path, `${JSON.stringify(sessionValue)}\n`, { mode: 0o600 });
+  await chmod(path, 0o600);
 }
 
 function storedSession(overrides: Record<string, unknown> = {}) {
   return {
-    version: 1,
+    version: 2,
     session,
     credentialHandle,
     applicationDid,
@@ -47,16 +50,21 @@ function storedSession(overrides: Record<string, unknown> = {}) {
     state: "state",
     redirectUrl: "http://127.0.0.1:1/oauth/callback",
     tokens: { access_token: "tok", token_type: "Bearer" },
+    owner: operatorPrincipal,
+    sharing: { applicationDids: [applicationDid], operatorPrincipals: [operatorPrincipal] },
     ...overrides,
   };
 }
 
-async function waitForAuthorizationUrl(getUrl: () => URL | undefined): Promise<URL> {
+async function waitForAuthorizationUrl(getUrl: () => URL | undefined): Promise<{ redirect: URL; state: string }> {
   await vi.waitFor(() => {
     expect(getUrl()).toBeDefined();
   });
   await new Promise((resolve) => setTimeout(resolve, 50));
-  return new URL(getUrl()!.searchParams.get("redirect_uri")!);
+  const authUrl = getUrl()!;
+  const redirect = new URL(authUrl.searchParams.get("redirect_uri")!);
+  const state = authUrl.searchParams.get("state")!;
+  return { redirect, state };
 }
 
 describe("OAuth operator service", () => {
@@ -191,8 +199,9 @@ describe("OAuth operator callbacks", () => {
     const fixture = await startOAuthProtectedMcpFixture();
     try {
       const login = await startLogin(fixture);
-      const redirect = await waitForAuthorizationUrl(login.authorizationUrl);
+      const { redirect, state } = await waitForAuthorizationUrl(login.authorizationUrl);
       const assertion = expect(login.loginPromise).rejects.toThrow(/OAuth authorization failed/);
+      redirect.searchParams.set("state", state);
       redirect.searchParams.set("error", "access_denied");
       await fetch(redirect);
       await assertion;
@@ -201,12 +210,13 @@ describe("OAuth operator callbacks", () => {
     }
   });
 
-  it("rejects a callback that omits code and state", async () => {
+  it("rejects a callback that omits the authorization code", async () => {
     const fixture = await startOAuthProtectedMcpFixture();
     try {
       const login = await startLogin(fixture);
-      const redirect = await waitForAuthorizationUrl(login.authorizationUrl);
-      const assertion = expect(login.loginPromise).rejects.toThrow(/missing code or state/);
+      const { redirect, state } = await waitForAuthorizationUrl(login.authorizationUrl);
+      const assertion = expect(login.loginPromise).rejects.toThrow(/missing an authorization code/);
+      redirect.searchParams.set("state", state);
       await fetch(redirect);
       await assertion;
     } finally {
@@ -218,7 +228,7 @@ describe("OAuth operator callbacks", () => {
     const fixture = await startOAuthProtectedMcpFixture();
     try {
       const login = await startLogin(fixture);
-      const redirect = await waitForAuthorizationUrl(login.authorizationUrl);
+      const { redirect } = await waitForAuthorizationUrl(login.authorizationUrl);
       const assertion = expect(login.loginPromise).rejects.toThrow(/state mismatch/);
       redirect.searchParams.set("code", "fixture-code");
       redirect.searchParams.set("state", "other-state");

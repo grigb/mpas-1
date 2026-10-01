@@ -1,4 +1,5 @@
 import type { Did, MpasHttpError } from "../types/mpas.js";
+import { strictJsonParse } from "../utils/strict-json.js";
 import {
   deriveMpasAudience,
   signMpasRfc9421,
@@ -132,7 +133,7 @@ export class MpasHttpTransport {
     }
     if (text.length === 0) return undefined as T;
     try {
-      return JSON.parse(text) as T;
+      return strictJsonParse(text) as T;
     } catch (cause) {
       throw this.errors.invalidJson(cause);
     }
@@ -164,7 +165,7 @@ export async function waitForPollInterval(intervalMs: number, signal?: AbortSign
 function parseMpasHttpError(text: string): MpasHttpError | undefined {
   if (text.length === 0) return undefined;
   try {
-    const parsed = JSON.parse(text) as Partial<MpasHttpError>;
+    const parsed = strictJsonParse(text) as Partial<MpasHttpError>;
     return parsed.type === "MpasHttpError" && typeof parsed.error?.code === "string"
       ? (parsed as MpasHttpError)
       : undefined;
