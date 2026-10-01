@@ -317,7 +317,10 @@ export class CoordinationStore {
     }
 
     if (stored.state === "awaitingApprovals") {
-      const status = evaluateApprovalRequirements(stored.authorizationRequirements.approvalRequirements, stored.approvals);
+      const status = evaluateApprovalRequirements(
+        stored.authorizationRequirements.approvalRequirements,
+        stored.approvals.filter((entry) => entry.signerDid !== stored.actionPackage.actionEnvelope.proposer.did),
+      );
       if (status === "satisfied") {
         stored.state = "readyForSubmission";
         stored.updatedAt = new Date().toISOString();
@@ -558,9 +561,13 @@ export class CoordinationStore {
       throw new MpasServiceError(400, "APPROVAL_DECISION_MISMATCH", "Approval decision does not match its signed payload.");
     }
 
-    // Self-approval prevention: the proposer of an action cannot approve their own action.
+    // This coordination store implements the JSON policy profile: group membership cannot permit self-approval.
     if (payload.signerDid === stored.actionPackage.actionEnvelope.proposer.did) {
-      throw new MpasServiceError(403, "SELF_APPROVAL_DENIED", "The proposer of an action cannot approve their own action.");
+      throw new MpasServiceError(
+        403,
+        "SELF_APPROVAL_DENIED",
+        "The proposer cannot approve their own action under the JSON policy profile.",
+      );
     }
 
     const prior = stored.approvals.find((entry) => entry.signerDid === payload.signerDid);
