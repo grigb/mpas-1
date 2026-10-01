@@ -274,6 +274,33 @@ describe("strict signed Approval payload parsing", () => {
     });
   });
 
+  describe("verifyActionPackage proposer signature", () => {
+    it.each([
+      ["propose", "verified"],
+      ["approve", "rejected"],
+    ] as const)("treats a proposer-signed %s Approval as %s", async (decision, status) => {
+      const fullPackage = await new ActionPackageBuilder({
+        applicationDid: actionPackage.actionEnvelope.target.applicationDid,
+        executionProfile: { id: "did:web:profiles.oma3.org:mcp", format: "mcp.toolsCall" },
+        keyManager,
+      }).buildFromToolCall("create_issue", {});
+      const envelopeHash = computeHash(fullPackage.actionEnvelope);
+      fullPackage.approvalBundle.approvals = [await signedApproval({
+        actionEnvelopeHash: envelopeHash, decision, createdAt: fullPackage.actionEnvelope.createdAt,
+      })];
+
+      const result = await verifyActionPackage(fullPackage, {
+        trustedSigners: [{ did: keyManager.did }],
+        trustedApplicationDids: [actionPackage.actionEnvelope.target.applicationDid],
+        now: Date.parse(fullPackage.actionEnvelope.createdAt) + 1000,
+      });
+
+      expect(result, JSON.stringify(result)).toMatchObject(
+        status === "verified" ? { status } : { status, code: "MISSING_PROPOSER_APPROVAL" },
+      );
+    });
+  });
+
   describe("ApprovalBuilder.verifyApproval", () => {
     it.each(duplicateMembers)("rejects duplicate %s", async (duplicateMember) => {
       const builder = new ApprovalBuilder({ keyManager });

@@ -751,17 +751,19 @@ export async function verifyActionPackage(
   const { verifiedApprovals } = bundleResult;
   onStep?.("approval_bundle_verification", true, { approvalCount: verifiedApprovals.approvals.length });
 
+  // The Approval Bundle MUST contain a verified `propose` Approval signed by the
+  // DID declared in actionEnvelope.proposer.did. `approve` is a Maintainer
+  // decision and never satisfies the Proposer signature requirement.
   const proposerDid = actionPackage.actionEnvelope.proposer.did;
   const hasProposerApproval = verifiedApprovals.approvals.some(
-    (verified) =>
-      (verified.decision === "propose" || verified.decision === "approve") && verified.signerDid === proposerDid,
+    (verified) => verified.decision === "propose" && verified.signerDid === proposerDid,
   );
   if (!hasProposerApproval) {
     onStep?.("proposer_approval_check", false, { proposerDid });
     return {
       status: "rejected",
       code: "MISSING_PROPOSER_APPROVAL",
-      message: "Approval Bundle must include a verified propose or approve Approval from actionEnvelope.proposer.did.",
+      message: "Approval Bundle must include a verified propose Approval from actionEnvelope.proposer.did.",
       path: "$.approvalBundle.approvals",
     };
   }
