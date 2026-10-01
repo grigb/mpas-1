@@ -33,6 +33,7 @@ import {
   MemoryWorkflowStore,
   MpasProtocolServer,
   ProposerBridge,
+  loadPlugin as loadSdkPlugin,
 } from "@oma3/mpas";
 import type {
   BridgeUpstreamTool,
@@ -127,7 +128,7 @@ export class GeneratedBridge {
   private readonly store: WorkflowStore;
 
   constructor(config: BridgeConfig) {
-    const plugin = loadPlugin(config.plugin);
+    const plugin = requireValidatedPlugin(config.plugin);
     const keyManagerPromise = loadKeyManager(config.agentKey);
     const workflow = config.workflow ?? {};
     const submissionTimeoutMs = workflow.submissionTimeoutMs;
@@ -282,7 +283,17 @@ export async function createBridgeFromConfig(configPath: string): Promise<Genera
   const absoluteConfigPath = resolve(configPath);
   const configDir = dirname(absoluteConfigPath);
   const config = JSON.parse(await readFile(absoluteConfigPath, "utf8")) as CliConfig;
-  return new GeneratedBridge(toBridgeConfig(config, configDir));
+  if (!config.plugin) {
+    throw new Error('Proposer bridge config requires "plugin".');
+  }
+  const pluginPath = resolve(configDir, config.plugin);
+  const pluginResult = await loadSdkPlugin(pluginPath);
+  if (!pluginResult.ok) {
+    throw new Error(
+      \`Unable to load plugin \${pluginPath}: [\${pluginResult.error.code}] \${pluginResult.error.message}\`,
+    );
+  }
+  return new GeneratedBridge(toBridgeConfig(config, configDir, pluginResult.plugin as unknown as MpasApplicationPlugin));
 }
 
 export async function runBridge(argv = process.argv.slice(2)): Promise<void> {
@@ -295,20 +306,15 @@ export async function runBridge(argv = process.argv.slice(2)): Promise<void> {
   await server.connect(transport);
 }
 
-function toBridgeConfig(config: CliConfig, configDir: string): BridgeConfig {
+function toBridgeConfig(config: CliConfig, configDir: string, plugin: MpasApplicationPlugin): BridgeConfig {
   if (config.mode === "maintainer") {
     throw new Error("Maintainer/signer mode is not supported by this proposer bridge.");
-  }
-  if (!config.plugin) {
-    throw new Error('Proposer bridge config requires "plugin".');
   }
   if (config.approvalStrategy !== undefined || config.approvalTimeoutMs !== undefined) {
     log("warn", "deprecated_config_ignored", {
       note: "approvalStrategy/approvalTimeoutMs are ignored: the bridge uses asynchronous Tasks or compatibility results.",
     });
   }
-  const pluginPath = resolve(configDir, config.plugin);
-  const plugin = loadPlugin(pluginPath);
   const adapterUrl = config.adapter?.url ?? config.adapterUrl;
   const actionEndpointUrl = config.actionEndpoint?.url;
   const verifierDid = config.actionEndpoint?.verifierDid;
@@ -322,6 +328,26 @@ function toBridgeConfig(config: CliConfig, configDir: string): BridgeConfig {
   if (!agentKey) {
     throw new Error('Proposer bridge config requires "agent.keyFile".');
   }
+  // Runtime identity is bound to the validated plugin. Legacy configuration
+  // values remain readable only when they exactly equal the plugin values.
+  const configuredApplicationDid = config.target?.applicationDid ?? config.applicationDid;
+  if (configuredApplicationDid !== undefined && configuredApplicationDid !== plugin.applicationDid) {
+    throw new Error(
+      \`Configured applicationDid \${configuredApplicationDid} does not match the plugin's applicationDid \${plugin.applicationDid}.\`,
+    );
+  }
+  const pluginProfile = {
+    id: plugin.executionProfile.id,
+    format: plugin.executionProfile.format ?? "mcp.toolsCall",
+  };
+  if (
+    config.executionProfile !== undefined &&
+    (config.executionProfile.id !== pluginProfile.id || config.executionProfile.format !== pluginProfile.format)
+  ) {
+    throw new Error(
+      \`Configured executionProfile (\${config.executionProfile.id}, \${config.executionProfile.format}) does not match the plugin's executionProfile (\${pluginProfile.id}, \${pluginProfile.format}).\`,
+    );
+  }
 
   const workflow: WorkflowConfig = { ...config.workflow };
   if (workflow.dbPath) {
@@ -329,8 +355,8 @@ function toBridgeConfig(config: CliConfig, configDir: string): BridgeConfig {
   }
 
   return {
-    plugin: pluginPath,
-    applicationDid: (config.target?.applicationDid ?? config.applicationDid ?? plugin.applicationDid) as BridgeConfig["applicationDid"],
+    plugin,
+    applicationDid: plugin.applicationDid as BridgeConfig["applicationDid"],
     adapterUrl: adapterUrl ?? actionEndpointUrl!,
     ...(actionEndpointUrl && verifierDid
       ? {
@@ -343,10 +369,7 @@ function toBridgeConfig(config: CliConfig, configDir: string): BridgeConfig {
       : {}),
     agentKey: resolve(configDir, agentKey),
     coordinationUrl: config.coordination?.url,
-    executionProfile: (config.executionProfile ?? {
-      id: plugin.executionProfile.id,
-      format: plugin.executionProfile.format ?? "mcp.toolsCall",
-    }) as BridgeConfig["executionProfile"],
+    executionProfile: pluginProfile as BridgeConfig["executionProfile"],
     defaultExpirationMinutes: config.defaultExpirationMinutes,
     workflow,
   };
@@ -357,9 +380,16 @@ function loadTools(): BridgeUpstreamTool[] {
   return JSON.parse(raw) as BridgeUpstreamTool[];
 }
 
-function loadPlugin(plugin: BridgeConfig["plugin"]): MpasApplicationPlugin {
+/**
+ * Generated bridges run only on plugins validated by the SDK loader (see
+ * createBridgeFromConfig). A raw path here means the bridge was constructed
+ * directly; resolve and validate it through createBridgeFromConfig instead.
+ */
+function requireValidatedPlugin(plugin: BridgeConfig["plugin"]): MpasApplicationPlugin {
   if (typeof plugin === "string") {
-    return JSON.parse(readFileSync(plugin, "utf8")) as MpasApplicationPlugin;
+    throw new Error(
+      "Plugin paths must be validated by the SDK loadPlugin before construction; use createBridgeFromConfig.",
+    );
   }
 
   return plugin;
