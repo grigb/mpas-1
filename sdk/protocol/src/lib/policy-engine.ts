@@ -123,7 +123,7 @@ export interface UnsatisfiedThreshold {
 
 export type PolicyResult =
   | { status: "satisfied" }
-  | { status: "rejected"; code: "ACTION_BLOCKED_BY_POLICY"; message: string }
+  | { status: "rejected"; code: "ACTION_BLOCKED_BY_POLICY" | "CONFLICTING_SIGNER_DECISIONS"; message: string }
   | { status: "additionalApprovalsRequired"; unsatisfiedRules: UnsatisfiedThreshold[] }
   /**
    * The Action Package (or policy) contains a value that prevents
@@ -271,7 +271,7 @@ function validateRequirement(
       if (hasGroup === hasSigners) {
         return `${path} must define exactly one of eligibleSignerGroup or eligibleSigners.`;
       }
-      if (hasGroup && !signerGroups[requirement.eligibleSignerGroup as string]) {
+      if (hasGroup && !Object.hasOwn(signerGroups, requirement.eligibleSignerGroup as string)) {
         return `${path}.eligibleSignerGroup does not exist in signerGroups.`;
       }
       if (requirement.decision === "reject" ||
@@ -347,6 +347,19 @@ export function evaluatePolicy(
   verifiedApprovals: VerifiedApprovals,
   policy: PolicyConfig,
 ): PolicyResult {
+  // Decision consistency belongs to this policy profile, not shared signature verification.
+  const decisionBySigner = new Map<Did, string>();
+  for (const approval of verifiedApprovals.approvals) {
+    const prior = decisionBySigner.get(approval.signerDid);
+    if (prior !== undefined && prior !== approval.decision) {
+      return {
+        status: "rejected",
+        code: "CONFLICTING_SIGNER_DECISIONS",
+        message: "One Signer supplied contradictory decisions for the same Action Envelope.",
+      };
+    }
+    decisionBySigner.set(approval.signerDid, approval.decision);
+  }
   const proposerDid = actionPackage.actionEnvelope.proposer.did;
 
   // Determine the action name from the execution payload.
@@ -354,7 +367,9 @@ export function evaluatePolicy(
   const actionName = isRecord(payload) && typeof payload.name === "string" ? payload.name : undefined;
 
   // Look up the action name in the policies object (structural match by key).
-  const policyEntries = actionName && policy.policies?.[actionName];
+  const policyEntries = actionName && policy.policies && Object.hasOwn(policy.policies, actionName)
+    ? policy.policies[actionName]
+    : undefined;
 
   // Collect all matching entries within the action's policy array.
   const matchedEntries: PolicyEntry[] = [];
@@ -541,7 +556,9 @@ function resolveEligibleSigners(requirement: ThresholdRequirement, policy: Polic
   }
 
   // Look up signerGroups (plain DID arrays).
-  return policy.signerGroups?.[requirement.eligibleSignerGroup] ?? [];
+  return policy.signerGroups && Object.hasOwn(policy.signerGroups, requirement.eligibleSignerGroup)
+    ? policy.signerGroups[requirement.eligibleSignerGroup]
+    : [];
 }
 
 // ---------------------------------------------------------------------------
@@ -640,6 +657,7 @@ function getJsonPointerValue(value: unknown, pointer: string): unknown {
     if (!isRecord(current) && !Array.isArray(current)) {
       return undefined;
     }
+    if (!Object.hasOwn(current, part)) return undefined;
     current = (current as Record<string, unknown>)[part];
   }
 

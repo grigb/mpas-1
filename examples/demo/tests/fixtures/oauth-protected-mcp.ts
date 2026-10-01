@@ -7,6 +7,9 @@ export interface OAuthProtectedMcpFixture {
   issuer: string;
   requests: Array<{ method: string; path: string; authorization?: string }>;
   tokenRequests: URLSearchParams[];
+  registrationRequests: unknown[];
+  revocationRequests: URLSearchParams[];
+  eventOrder: string[];
   close(): Promise<void>;
 }
 
@@ -17,6 +20,13 @@ export interface OAuthProtectedMcpFixtureOptions {
   scopesSupported?: string[];
   authorizationServerScopesSupported?: string[];
   issueRefreshToken?: boolean;
+  invalidRefreshGrant?: boolean;
+  refreshDelayMs?: number;
+  advertiseRegistrationEndpoint?: boolean;
+  clientIdMetadataDocumentSupported?: boolean;
+  authorizationResponseIssuerSupported?: boolean;
+  advertiseRevocationEndpoint?: boolean;
+  clientMetadataRedirectUri?: string;
 }
 
 export async function startOAuthProtectedMcpFixture(
@@ -24,6 +34,9 @@ export async function startOAuthProtectedMcpFixture(
 ): Promise<OAuthProtectedMcpFixture> {
   const requests: OAuthProtectedMcpFixture["requests"] = [];
   const tokenRequests: URLSearchParams[] = [];
+  const registrationRequests: unknown[] = [];
+  const revocationRequests: URLSearchParams[] = [];
+  const eventOrder: string[] = [];
   let origin = "";
   const accessToken = "fixture-access-token";
   const refreshedAccessToken = "fixture-refreshed-access-token";
@@ -49,7 +62,14 @@ export async function startOAuthProtectedMcpFixture(
         issuer: options.authorizationServerIssuer ?? `${origin}/issuer`,
         authorization_endpoint: `${origin}/authorize`,
         token_endpoint: `${origin}/token`,
-        registration_endpoint: `${origin}/register`,
+        ...(options.advertiseRegistrationEndpoint === false ? {} : { registration_endpoint: `${origin}/register` }),
+        ...(options.clientIdMetadataDocumentSupported === true
+          ? { client_id_metadata_document_supported: true }
+          : {}),
+        ...(options.authorizationResponseIssuerSupported === true
+          ? { authorization_response_iss_parameter_supported: true }
+          : {}),
+        ...(options.advertiseRevocationEndpoint === true ? { revocation_endpoint: `${origin}/revoke` } : {}),
         ...(options.omitCodeChallengeMethodsSupported ? {} : {
           code_challenge_methods_supported: options.codeChallengeMethodsSupported ?? ["S256"],
         }),
@@ -63,6 +83,7 @@ export async function startOAuthProtectedMcpFixture(
     if (path === "/register" && request.method === "POST") {
       return readBody(request, (body) => {
         const metadata = JSON.parse(body);
+        registrationRequests.push(metadata);
         return json(response, 201, {
           ...metadata,
           client_id: "fixture-dynamic-client",
@@ -76,19 +97,27 @@ export async function startOAuthProtectedMcpFixture(
         const params = new URLSearchParams(body);
         tokenRequests.push(params);
         if (params.get("grant_type") === "refresh_token") {
+          const completeRefresh = () => {
           if (
+            options.invalidRefreshGrant === true ||
             params.get("refresh_token") !== "fixture-refresh-token" ||
             params.get("resource") !== `${origin}/mcp`
           ) {
             return json(response, 400, { error: "invalid_grant" });
           }
-          return json(response, 200, {
+          json(response, 200, {
             access_token: refreshedAccessToken,
             token_type: "Bearer",
             expires_in: 3600,
             refresh_token: "fixture-rotated-refresh-token",
             scope: "mcp:tools",
           });
+          };
+          if ((options.refreshDelayMs ?? 0) > 0) {
+            setTimeout(completeRefresh, options.refreshDelayMs);
+            return;
+          }
+          return completeRefresh();
         }
         if (
           params.get("grant_type") !== "authorization_code" ||
@@ -105,6 +134,27 @@ export async function startOAuthProtectedMcpFixture(
           ...(options.issueRefreshToken === false ? {} : { refresh_token: "fixture-refresh-token" }),
           scope: params.get("scope") ?? "mcp:tools",
         });
+      });
+    }
+
+    if (path === "/revoke" && request.method === "POST") {
+      return readBody(request, (body) => {
+        const params = new URLSearchParams(body);
+        revocationRequests.push(params);
+        eventOrder.push(`revoke:${params.get("token_type_hint") ?? "unknown"}`);
+        response.statusCode = 200;
+        response.end();
+      });
+    }
+
+    if (path === "/client-metadata" && request.method === "GET") {
+      return json(response, 200, {
+        client_id: `${origin}/client-metadata`,
+        client_name: "Fixture CIMD Client",
+        redirect_uris: options.clientMetadataRedirectUri ? [options.clientMetadataRedirectUri] : [],
+        grant_types: ["authorization_code", "refresh_token"],
+        response_types: ["code"],
+        token_endpoint_auth_method: "none",
       });
     }
 
@@ -166,6 +216,9 @@ export async function startOAuthProtectedMcpFixture(
     issuer: `${origin}/issuer`,
     requests,
     tokenRequests,
+    registrationRequests,
+    revocationRequests,
+    eventOrder,
     close: () => new Promise<void>((resolve, reject) => {
       server.close((error) => error ? reject(error) : resolve());
     }),

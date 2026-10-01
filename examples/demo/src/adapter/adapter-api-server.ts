@@ -25,7 +25,7 @@ import {
   verifyActionPackage,
 } from "../core/verification.js";
 import { DispatchLedger } from "./dispatch-ledger.js";
-import type { LoadedDeploymentConfig } from "./config-loader.js";
+import type { LoadedDeploymentConfig, ManagedOAuthConfiguration } from "./config-loader.js";
 import type { FileCredentialProvider } from "./credential-provider.js";
 import { oauthLoginCommand, prepareOAuthForDispatch } from "./oauth-operator.js";
 import { prepareMcpHttp } from "./dispatch/mcp-http.js";
@@ -40,6 +40,8 @@ export interface HttpEndpointOptions {
   adapterSigner?: MpasJwsSigner;
   ledger?: DispatchLedger;
   maxEnvelopeValidityMs?: number;
+  /** Deterministic clock for testing. Defaults to Date.now(). */
+  now?: number;
   traceLogger?: TraceLogger;
 }
 
@@ -52,6 +54,7 @@ export function createAdapterApiServer(options: HttpEndpointOptions): FastifyIns
   const app = Fastify({ logger: false });
   const ledger = options.ledger ?? new DispatchLedger();
   const maxEnvelopeValidityMs = options.maxEnvelopeValidityMs ?? DEFAULT_MAX_ENVELOPE_VALIDITY_MS;
+  const fixedNow = options.now;
   const trace = options.traceLogger ?? new TraceLogger("adapter");
 
   // Accept the canonical MPAS media type as well as application/json (profile MAY).
@@ -144,7 +147,7 @@ export function createAdapterApiServer(options: HttpEndpointOptions): FastifyIns
     }
 
     // Stateless deterministic rejections (record nothing, repeatable verdict).
-    if (isActionEnvelopeExpired(pkg.actionEnvelope)) {
+    if (isActionEnvelopeExpired(pkg.actionEnvelope, fixedNow)) {
       trace.emit("verification_step", { actionId, step: "expiry_check", passed: false });
       return rejection(pkg, options, envelopeHash, "expired", "EXPIRED_ACTION_ENVELOPE", "Action Envelope is expired.");
     }
@@ -171,7 +174,7 @@ export function createAdapterApiServer(options: HttpEndpointOptions): FastifyIns
     }
     trace.emit("verification_step", { actionId, step: "execution_profile_check", passed: true });
 
-    if (exceedsMaxEnvelopeValidity(pkg.actionEnvelope, maxEnvelopeValidityMs)) {
+    if (exceedsMaxEnvelopeValidity(pkg.actionEnvelope, maxEnvelopeValidityMs, fixedNow)) {
       trace.emit("verification_step", { actionId, step: "max_validity_check", passed: false });
       return actionResponse(options, {
         result: "rejected",
@@ -184,6 +187,8 @@ export function createAdapterApiServer(options: HttpEndpointOptions): FastifyIns
     const verification = await verifyActionPackage(pkg, {
       trustedSigners: loadedConfig.config.signerKeys,
       trustedApplicationDids: [loadedConfig.config.target.applicationDid],
+      now: fixedNow,
+      maxEnvelopeValidityMs,
       onStep: (step, passed, details) => {
         trace.emit("verification_step", { actionId, step, passed, ...details });
       },
@@ -443,18 +448,32 @@ async function prepareTarget(
   const protocolVersion = loadedConfig.plugin.executionProfile.protocolVersion;
   if (loadedConfig.config.executionTarget.type === "mcp.http") {
     if (loadedConfig.config.executionTarget.auth?.type === "oauth2") {
+      const oauthAuth = loadedConfig.config.executionTarget.auth as ManagedOAuthConfiguration;
       const operatorCommand = oauthLoginCommand({
         applicationDid: loadedConfig.config.target.applicationDid,
         resourceUrl: loadedConfig.config.executionTarget.url,
-        session: loadedConfig.config.executionTarget.auth.session,
+        session: oauthAuth.session,
         credentialHandle: loadedConfig.config.credentialBindings[0].credentialHandle,
       });
       const preparedOAuth = await prepareOAuthForDispatch(
-        loadedConfig.config.executionTarget.auth.session,
+        oauthAuth.session,
         loadedConfig.config.credentialBindings[0].credentialHandle,
         loadedConfig.config.target.applicationDid,
         loadedConfig.config.executionTarget.url,
         credentialDir,
+        {
+          scopes: oauthAuth.scopes,
+          refreshScope: loadedConfig.plugin.credentialRequirements
+            ?.map((requirement: { refreshScope?: string }) => requirement.refreshScope)
+            .find((scope: string | undefined) => typeof scope === "string" && scope.trim().length > 0)
+            ?.trim() ?? "offline_access",
+          issuer: oauthAuth.issuer,
+          client: oauthAuth.client,
+          owner: oauthAuth.owner,
+          sharing: oauthAuth.sharing,
+          refresh: oauthAuth.refresh,
+          ...(credentialDir ? { auditPath: `${credentialDir}/oauth-audit.jsonl` } : {}),
+        },
       );
       if (!preparedOAuth.ok) {
         return { ok: false, error: preparedOAuth.error };

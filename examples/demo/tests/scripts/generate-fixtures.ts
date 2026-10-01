@@ -88,7 +88,7 @@ async function makeActionPackage({
   approvals,
   applicationDid = "did:web:github-mirror.example",
   createdAt = "2026-06-05T18:00:00.000Z",
-  expiresAt = "2030-01-01T00:00:00.000Z",
+  expiresAt = "2026-06-06T17:00:00.000Z",
 }: {
   payload: Record<string, unknown>;
   actionId: string;
