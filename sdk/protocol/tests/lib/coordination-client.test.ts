@@ -440,6 +440,43 @@ describe("Coordination Service clients", () => {
     }
   });
 
+  it("rejects an Approval response in the non-canonical readyForResubmission state", async () => {
+    const actionPackage = await readJson<ActionPackage>(
+      join(fixturesDir, "action-packages", "valid-create-issue-package.json"),
+    );
+    const approval = actionPackage.approvalBundle.approvals[0] as Approval;
+    const responseBody = {
+      version: "1",
+      type: "CoordinationApprovalSubmissionResponse",
+      accepted: true,
+      actionRef: {
+        version: "1",
+        type: "ActionRef",
+        actionId: actionPackage.actionEnvelope.actionId,
+        actionEnvelopeHash: actionPackage.approvalBundle.actionEnvelopeHash,
+      },
+      state: "readyForResubmission",
+      createdAt: "2026-06-05T18:20:00.000Z",
+    } as const;
+    const server = await startMockCoordination((_request, response) => sendJson(response, responseBody));
+
+    try {
+      const client = new CoordinationServiceClient({
+        url: server.url,
+        participantDid: actionPackage.actionEnvelope.proposer.did,
+      });
+      await expect(client.submitApproval({
+        actionEnvelopeHash: actionPackage.approvalBundle.actionEnvelopeHash,
+        approval,
+      })).rejects.toMatchObject({
+        name: "CoordinationResponseInvalid",
+        code: "COORDINATION_RESPONSE_INVALID",
+      });
+    } finally {
+      await server.close();
+    }
+  });
+
   it("rejects an Approval response with an undeclared top-level member", async () => {
     const actionPackage = await readJson<ActionPackage>(
       join(fixturesDir, "action-packages", "valid-create-issue-package.json"),

@@ -495,7 +495,6 @@ export class CoordinationClient extends CoordinationServiceClient {}
 const COORDINATION_APPROVAL_STATES = new Set([
   "awaitingApprovals",
   "readyForSubmission",
-  "readyForResubmission",
   "executed",
   "rejected",
   "cancelled",
