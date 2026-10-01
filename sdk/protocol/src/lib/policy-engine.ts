@@ -123,7 +123,7 @@ export interface UnsatisfiedThreshold {
 
 export type PolicyResult =
   | { status: "satisfied" }
-  | { status: "rejected"; code: "ACTION_BLOCKED_BY_POLICY"; message: string }
+  | { status: "rejected"; code: "ACTION_BLOCKED_BY_POLICY" | "CONFLICTING_SIGNER_DECISIONS"; message: string }
   | { status: "additionalApprovalsRequired"; unsatisfiedRules: UnsatisfiedThreshold[] }
   /**
    * The Action Package (or policy) contains a value that prevents
@@ -347,6 +347,19 @@ export function evaluatePolicy(
   verifiedApprovals: VerifiedApprovals,
   policy: PolicyConfig,
 ): PolicyResult {
+  // Decision consistency belongs to this policy profile, not shared signature verification.
+  const decisionBySigner = new Map<Did, string>();
+  for (const approval of verifiedApprovals.approvals) {
+    const prior = decisionBySigner.get(approval.signerDid);
+    if (prior !== undefined && prior !== approval.decision) {
+      return {
+        status: "rejected",
+        code: "CONFLICTING_SIGNER_DECISIONS",
+        message: "One Signer supplied contradictory decisions for the same Action Envelope.",
+      };
+    }
+    decisionBySigner.set(approval.signerDid, approval.decision);
+  }
   const proposerDid = actionPackage.actionEnvelope.proposer.did;
 
   // Determine the action name from the execution payload.

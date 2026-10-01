@@ -23,14 +23,14 @@ export type DispatchResolution = "executed" | "failed" | "indeterminate";
 export type LedgerEvent =
   | {
       event: "executing";
-      actionId: string;
+      actionId: ActionId | string;
       envelopeHash: string;
       expiresAt: string;
       at: string;
     }
   | {
       event: "resolved";
-      actionId: string;
+      actionId: ActionId | string;
       resolution: DispatchResolution;
       /** Exact terminal response retained for internal delivery recovery. */
       response?: ActionResponse;
@@ -43,6 +43,7 @@ export type LedgerCheck =
   | { kind: "reject"; code: "ACTION_ID_HASH_MISMATCH" | "REPLAY_DETECTED"; message: string };
 
 interface LedgerEntry {
+  actionId: ActionId | string;
   envelopeHash: string;
   status: "executing" | "resolved";
   resolution?: DispatchResolution;
@@ -135,7 +136,7 @@ export class DispatchLedger {
    * with full verification; the authoritative gate is {@link authorizeDispatch}.
    */
   check(actionId: ActionId, envelopeHash: string): LedgerCheck {
-    const entry = this.entries.get(key(actionId));
+    const entry = this.entryFor(actionId);
     if (!entry) {
       return { kind: "absent" };
     }
@@ -170,19 +171,19 @@ export class DispatchLedger {
 
     const event: LedgerEvent = {
       event: "executing",
-      actionId: key(actionId),
+      actionId: { ...actionId },
       envelopeHash,
       expiresAt,
       at: new Date(this.now()).toISOString(),
     };
     this.journal.append(event);
-    this.entries.set(key(actionId), { envelopeHash, status: "executing", expiresAt });
+    this.entries.set(key(actionId), { actionId: event.actionId, envelopeHash, status: "executing", expiresAt });
     return { kind: "absent" };
   }
 
   /** Immutable transition executing -> resolved. Never rolls back. */
   resolve(actionId: ActionId, resolution: DispatchResolution, response?: ActionResponse): void {
-    const entry = this.entries.get(key(actionId));
+    const entry = this.entryFor(actionId);
     if (!entry) {
       return;
     }
@@ -197,7 +198,7 @@ export class DispatchLedger {
       if (entry.resolution !== resolution || entry.response || !response) return;
       this.journal.append({
         event: "resolved",
-        actionId: key(actionId),
+        actionId: entry.actionId,
         resolution,
         response,
         at: new Date(this.now()).toISOString(),
@@ -208,7 +209,7 @@ export class DispatchLedger {
 
     this.journal.append({
       event: "resolved",
-      actionId: key(actionId),
+      actionId: entry.actionId,
       resolution,
       ...(response ? { response } : {}),
       at: new Date(this.now()).toISOString(),
@@ -223,7 +224,7 @@ export class DispatchLedger {
    * Envelope. This does not alter the public resolved-replay rejection rule.
    */
   recoveryFor(actionId: ActionId, envelopeHash: string): DispatchRecovery | undefined {
-    const entry = this.entries.get(key(actionId));
+    const entry = this.entryFor(actionId);
     if (!entry || entry.status !== "resolved" || entry.envelopeHash !== envelopeHash || !entry.resolution) {
       return undefined;
     }
@@ -237,10 +238,18 @@ export class DispatchLedger {
     return this.entries.size;
   }
 
+  private entryFor(actionId: ActionId): LedgerEntry | undefined {
+    // Legacy journals flattened the pair. Keep their replay protection without
+    // letting that ambiguous representation collide with new, explicit pairs.
+    const legacyId = actionId.scope ? `${actionId.scope}:${actionId.value}` : actionId.value;
+    return this.entries.get(key(actionId)) ?? this.entries.get(key(legacyId));
+  }
+
   private replay(): void {
     for (const event of this.journal.readAll()) {
       if (event.event === "executing") {
-        this.entries.set(event.actionId, {
+        this.entries.set(key(event.actionId), {
+          actionId: event.actionId,
           envelopeHash: event.envelopeHash,
           status: "executing",
           expiresAt: event.expiresAt,
@@ -248,7 +257,7 @@ export class DispatchLedger {
         continue;
       }
 
-      const entry = this.entries.get(event.actionId);
+      const entry = this.entries.get(key(event.actionId));
       if (entry) {
         entry.status = "resolved";
         entry.resolution = event.resolution;
@@ -263,11 +272,11 @@ export class DispatchLedger {
    * recovery is idempotent across repeated restarts.
    */
   private recover(): void {
-    for (const [actionId, entry] of this.entries) {
+    for (const entry of this.entries.values()) {
       if (entry.status === "executing") {
         this.journal.append({
           event: "resolved",
-          actionId,
+          actionId: entry.actionId,
           resolution: "indeterminate",
           at: new Date(this.now()).toISOString(),
         });
@@ -278,6 +287,8 @@ export class DispatchLedger {
   }
 }
 
-function key(actionId: ActionId): string {
-  return actionId.scope ? `${actionId.scope}:${actionId.value}` : actionId.value;
+function key(actionId: ActionId | string): string {
+  // A one-element tuple identifies a legacy journal key. New entries retain the
+  // full pair, including the difference between no scope and any scoped value.
+  return JSON.stringify(typeof actionId === "string" ? [actionId] : [actionId.scope ?? null, actionId.value]);
 }
